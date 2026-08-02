@@ -1,183 +1,424 @@
 // ============================================================
-// 揭棋 - AI 搜索算法 (Minimax + Alpha-Beta 剪枝)
+// 揭棋 - AI 搜索（Minimax + Alpha-Beta + PVS + Quiescence）
 // ============================================================
 
 import { Color, PieceType, type Position, type Piece } from '../engine/types';
-import { cloneBoardState, getEffectiveType, opponentColor } from '../engine/board';
+import { cloneGridFast, samePos } from '../engine/utils';
+import { opponentColor, getEffectiveType, findKing } from '../engine/board';
 import { getAllLegalMoves, isInCheck, type BoardState } from '../engine/moves';
-import { evaluateBoard } from './evaluate';
+import { evaluateBoard, getPieceValueSimple, PIECE_VALUES } from './evaluate';
+import { TranspositionTable, TTFlag } from './tt';
+import { computeHash } from './zobrist';
 
-/** AI 配置 */
-export interface AIConfig {
-  maxDepth: number;
-  timeLimit: number; // 毫秒，0 = 不限制
-}
+// ---- 常量 ----
+const INF = 999999;
+const MATE_SCORE = 100000;
+const DRAW_SCORE = 0;
+const NULL_MOVE_R = 2;       // 空着裁剪缩减深度
+const MIN_NULL_DEPTH = 2;    // 最小空着深度
+const RAZOR_MARGIN = 300;    // 剃刀剪枝边距
 
+// ---- 全局搜索状态（模块级单例） ----
+let tt: TranspositionTable;
+let nodesSearched = 0;
 let searchStartTime = 0;
 let timeLimit = 0;
-let nodesSearched = 0;
-const killerMoves: Map<number, { from: Position; to: Position }> = new Map();
 
-/** AI 入口：找到最佳着法 */
-export function findBestMove(state: BoardState, config: AIConfig): { from: Position; to: Position } | null {
-  searchStartTime = Date.now();
-  timeLimit = config.timeLimit;
-  nodesSearched = 0;
-  killerMoves.clear();
+// 杀手着法：killerMoves[ply] = [slot0, slot1]
+const killerMoves: [number, number][] = Array.from({ length: 64 }, () => [0, 0]);
 
-  const allMoves = getAllLegalMoves(state);
-  if (allMoves.length === 0) return null;
+// 历史启发表
+const historyTable = new Map<number, number>();
+const MAX_HISTORY = 1 << 16;
 
-  const aiColor = state.currentTurn;
-  let bestMove: { from: Position; to: Position } | null = null;
-  let bestScore = -Infinity;
-
-  // 迭代加深
-  for (let depth = 1; depth <= config.maxDepth; depth++) {
-    let alpha = -Infinity;
-    const beta = Infinity;
-    let currentBest: { from: Position; to: Position } | null = null;
-
-    // 对候选着法排序
-    const sorted = orderMoves(state, allMoves);
-
-    for (const move of sorted) {
-      const newGrid = applySimple(state, move.from, move.to);
-      const newState: BoardState = { ...state, grid: newGrid, currentTurn: opponentColor(aiColor) };
-
-      const score = -minimax(newState, depth - 1, -beta, -alpha);
-
-      if (score > bestScore) {
-        bestScore = score;
-        currentBest = move;
-      }
-      if (score > alpha) {
-        alpha = score;
-        killerMoves.set(depth, move);
-      }
-
-      if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
-    }
-
-    if (currentBest) bestMove = currentBest;
-    if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
-    if (bestScore > 9000 || bestScore < -9000) break;
-  }
-
-  return bestMove;
+// ---- 着法编解码（10*9 棋盘，10 以内数字可单字节编码） ----
+function encode(from: Position, to: Position): number {
+  return from.row * 1000 + from.col * 100 + to.row * 10 + to.col;
 }
 
-/** Minimax + Alpha-Beta */
-function minimax(
-  state: BoardState,
-  depth: number,
+// ---- 轻量着法应用（搜索树用，仅克隆 grid） ----
+interface MoveResult {
+  grid: (Piece | null)[][];
+  piece: Piece;
+  captured: Piece | null;
+}
+
+function applyMove(grid: (Piece | null)[][], from: Position, to: Position): MoveResult {
+  const newGrid = cloneGridFast(grid);
+  const piece = { ...newGrid[from.row][from.col]! };
+  const captured = newGrid[to.row][to.col] ? { ...newGrid[to.row][to.col]! } : null;
+
+  newGrid[from.row][from.col] = null;
+  if (piece.hidden) piece.hidden = false;
+  newGrid[to.row][to.col] = piece;
+
+  return { grid: newGrid, piece, captured };
+}
+
+/** 将 grid + currentTurn 组成临时 BoardState（search 内部快速构造） */
+function makeTempState(grid: (Piece | null)[][], turn: Color): BoardState {
+  return {
+    grid, currentTurn: turn,
+    status: 0 as unknown as BoardState['status'],
+    moveHistory: [], redCaptured: [], blackCaptured: [],
+  };
+}
+
+// ---- 静态搜索（Quiescence Search） ----
+function quiescence(
+  grid: (Piece | null)[][],
+  turn: Color,
   alpha: number,
   beta: number,
 ): number {
   nodesSearched++;
 
-  if (timeLimit > 0 && nodesSearched % 100 === 0 && Date.now() - searchStartTime > timeLimit) {
+  if (timeLimit > 0 && (nodesSearched & 127) === 0 && Date.now() - searchStartTime > timeLimit) {
     return 0;
   }
 
-  if (depth === 0) {
-    return evaluateBoard(state.grid);
-  }
+  // 站位评估
+  const standPat = turn === Color.Red
+    ? evaluateBoard(grid)
+    : -evaluateBoard(grid);
 
+  if (standPat >= beta) return beta;
+  if (standPat > alpha) alpha = standPat;
+
+  // 收集吃子着法
+  const state = makeTempState(grid, turn);
   const allMoves = getAllLegalMoves(state);
+  const captures: { from: Position; to: Position; victimVal: number }[] = [];
 
-  // 无合法着法 = 被将死/困毙
-  if (allMoves.length === 0) {
-    if (isInCheck(state.grid, state.currentTurn)) {
-      return -10000 + (10 - depth); // 被将死
+  for (const m of allMoves) {
+    const victim = grid[m.to.row][m.to.col];
+    if (victim) {
+      captures.push({ ...m, victimVal: getPieceValueSimple(victim.type) });
     }
-    return 0; // 困毙
   }
 
-  let bestVal = -Infinity;
-  const sorted = orderMoves(state, allMoves);
+  if (captures.length === 0) return standPat;
 
-  for (const move of sorted) {
-    const newGrid = applySimple(state, move.from, move.to);
-    const newState: BoardState = { ...state, grid: newGrid, currentTurn: opponentColor(state.currentTurn) };
-
-    const evalScore = -minimax(newState, depth - 1, -beta, -alpha);
-
-    if (evalScore >= beta) {
-      killerMoves.set(depth, move);
-      return beta; // Beta 剪枝
-    }
-    if (evalScore > bestVal) {
-      bestVal = evalScore;
-    }
-    alpha = Math.max(alpha, evalScore);
-  }
-
-  return bestVal;
-}
-
-/** 着法排序（MVV-LVA + 杀手启发） */
-function orderMoves(
-  state: BoardState,
-  moves: { from: Position; to: Position }[],
-): { from: Position; to: Position }[] {
-  const grid = state.grid;
-
-  const scored = moves.map(move => {
-    let score = 0;
-    const fromPiece = grid[move.from.row][move.from.col];
-    const toPiece = grid[move.to.row][move.to.col];
-
-    // MVV-LVA
-    if (toPiece && fromPiece) {
-      const victimVal = getPieceValueSimple(toPiece);
-      const attackerVal = fromPiece.hidden
-        ? getPieceValueSimple(getEffectiveType(fromPiece, move.from))
-        : getPieceValueSimple(fromPiece.type);
-      score = victimVal * 10 - attackerVal;
-    }
-
-    // 杀手启发
-    const killer = killerMoves.get(state.moveHistory.length + 1);
-    if (killer && killer.from.row === move.from.row && killer.from.col === move.from.col &&
-        killer.to.row === move.to.row && killer.to.col === move.to.col) {
-      score += 500;
-    }
-
-    // 暗子翻开加分
-    if (fromPiece?.hidden) score += 30;
-
-    return { move, score };
+  // MVV-LVA 排序
+  captures.sort((a, b) => {
+    const va = a.victimVal;
+    const vb = b.victimVal;
+    if (va !== vb) return vb - va;
+    const aa = grid[a.from.row][a.from.col];
+    const ab = grid[b.from.row][b.from.col];
+    const ava = aa?.hidden
+      ? (PIECE_VALUES[getEffectiveType(aa, a.from) ?? PieceType.Pawn] ?? 100) * 0.75
+      : getPieceValueSimple(aa?.type ?? PieceType.Pawn);
+    const avb = ab?.hidden
+      ? (PIECE_VALUES[getEffectiveType(ab, b.from) ?? PieceType.Pawn] ?? 100) * 0.75
+      : getPieceValueSimple(ab?.type ?? PieceType.Pawn);
+    return ava - avb;
   });
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored.map(s => s.move);
+  // Delta 剪枝
+  if (standPat + getPieceValueSimple(PieceType.Chariot) + 200 < alpha) return alpha;
+
+  for (const mv of captures) {
+    const result = applyMove(grid, mv.from, mv.to);
+    // 跳过送将的着法
+    if (isInCheck(result.grid, turn)) continue;
+
+    const score = -quiescence(result.grid, opponentColor(turn), -beta, -alpha);
+
+    if (score >= beta) return beta;
+    if (score > alpha) alpha = score;
+  }
+
+  return alpha;
 }
 
-function getPieceValueSimple(t: Piece | PieceType): number {
-  const type = typeof t === 'object' && 'type' in t ? t.type : t;
-  const values: Record<PieceType, number> = {
-    [PieceType.King]: 10000,
-    [PieceType.Chariot]: 900,
-    [PieceType.Cannon]: 450,
-    [PieceType.Horse]: 400,
-    [PieceType.Elephant]: 200,
-    [PieceType.Advisor]: 200,
-    [PieceType.Pawn]: 100,
-  };
-  return values[type] ?? 0;
+// ---- 着法排序 ----
+interface ScoredMove {
+  from: Position;
+  to: Position;
+  score: number;
+  encoded: number;
 }
 
-/** 应用着法到 grid（不修改状态，用于搜索） */
-function applySimple(
+function orderMoves(
+  grid: (Piece | null)[][],
+  turn: Color,
+  moves: { from: Position; to: Position }[],
+  ttMove: number,
+  ply: number,
+): ScoredMove[] {
+  const result: ScoredMove[] = [];
+
+  for (const m of moves) {
+    const enc = encode(m.from, m.to);
+    let score = 0;
+
+    if (enc === ttMove) {
+      score = 10_000_000;
+    } else {
+      const victim = grid[m.to.row][m.to.col];
+      const attacker = grid[m.from.row][m.from.col];
+
+      if (victim) {
+        // MVV-LVA 吃子排序
+        const victimVal = getPieceValueSimple(victim.type);
+        const attackerVal = attacker?.hidden
+          ? (PIECE_VALUES[getEffectiveType(attacker, m.from) ?? PieceType.Pawn] ?? 100) * 0.75
+          : getPieceValueSimple(attacker?.type ?? PieceType.Pawn);
+        score = 900_000 + victimVal * 100 - attackerVal;
+      } else {
+        // 杀手着法
+        if (killerMoves[ply][0] === enc) score = 800_000;
+        else if (killerMoves[ply][1] === enc) score = 799_999;
+        // 历史启发
+        else score = historyTable.get(enc) ?? 0;
+        // 暗子翻开加成
+        if (attacker?.hidden) score += 500;
+      }
+    }
+
+    result.push({ from: m.from, to: m.to, score, encoded: enc });
+  }
+
+  result.sort((a, b) => b.score - a.score);
+  return result;
+}
+
+// ---- 主搜索（Negamax + PVS） ----
+function search(
+  grid: (Piece | null)[][],
+  turn: Color,
+  depth: number,
+  alpha: number,
+  beta: number,
+  ply: number,
+  isPV: boolean,
+): number {
+  nodesSearched++;
+
+  // 超时检测（每 64 个节点检测一次）
+  if (timeLimit > 0 && (nodesSearched & 63) === 0 && Date.now() - searchStartTime > timeLimit) {
+    return 0;
+  }
+
+  // ===== 置换表探测 =====
+  const hash = computeHash(grid, turn);
+  const ttEntry = tt.probe(hash);
+  let ttMove = 0;
+
+  if (ttEntry && ttEntry.depth >= depth) {
+    if (ttEntry.flag === TTFlag.EXACT) return ttEntry.score;
+    if (ttEntry.flag === TTFlag.ALPHA && ttEntry.score <= alpha) return ttEntry.score;
+    if (ttEntry.flag === TTFlag.BETA && ttEntry.score >= beta) return ttEntry.score;
+  }
+  if (ttEntry) ttMove = ttEntry.bestMove;
+
+  // ===== 叶节点 → 静态搜索 =====
+  if (depth <= 0) {
+    return quiescence(grid, turn, alpha, beta);
+  }
+
+  // ===== 生成合法着法 =====
+  const state = makeTempState(grid, turn);
+  const allMoves = getAllLegalMoves(state);
+
+  // 将死/困毙检测
+  if (allMoves.length === 0) {
+    if (isInCheck(grid, turn)) {
+      return -(MATE_SCORE - ply);
+    }
+    return DRAW_SCORE;
+  }
+
+  // ===== 剃刀剪枝（仅在浅层非 PV 节点） =====
+  if (!isPV && depth <= 2 && !isInCheck(grid, turn)) {
+    const staticEval = turn === Color.Red
+      ? evaluateBoard(grid)
+      : -evaluateBoard(grid);
+    if (staticEval - RAZOR_MARGIN * depth >= beta) {
+      return staticEval - RAZOR_MARGIN * depth;
+    }
+  }
+
+  // ===== 空着裁剪 =====
+  if (!isPV && !isInCheck(grid, turn) && depth >= MIN_NULL_DEPTH) {
+    // 检查是否有足够子力（避免入局误判）
+    let pc = 0;
+    for (let r = 0; r < 10; r++)
+      for (let c = 0; c < 9; c++)
+        if (grid[r][c]) pc++;
+    if (pc > 10) {
+      const R = NULL_MOVE_R + (depth > 6 ? 1 : 0);
+      const nullScore = -search(grid, opponentColor(turn), depth - 1 - R, -beta, -beta + 1, ply + 1, false);
+      if (nullScore >= beta) return beta;
+    }
+  }
+
+  // ===== 着法排序 =====
+  const scored = orderMoves(grid, turn, allMoves, ttMove, ply);
+
+  // ===== PVS 主搜索循环 =====
+  let bestScore = -INF;
+  let bestMove = 0;
+  let flag = TTFlag.ALPHA;
+  let first = true;
+
+  for (const move of scored) {
+    const result = applyMove(grid, move.from, move.to);
+    const newTurn = opponentColor(turn);
+    let score: number;
+
+    if (first) {
+      score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, isPV);
+      first = false;
+    } else {
+      // 零窗口搜索
+      score = -search(result.grid, newTurn, depth - 1, -alpha - 1, -alpha, ply + 1, false);
+      // 窗口失效 → 重新完整搜索
+      if (score > alpha && score < beta) {
+        score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, true);
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMove = move.encoded;
+
+      if (score > alpha) {
+        alpha = score;
+        flag = TTFlag.EXACT;
+
+        // Beta 剪枝
+        if (score >= beta) {
+          flag = TTFlag.BETA;
+          // 非吃子着法 → 更新杀手
+          if (!grid[move.to.row][move.to.col]) {
+            updateKiller(move.encoded, ply);
+          }
+          updateHistory(move.encoded, depth);
+          break;
+        }
+      }
+    }
+
+    if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
+  }
+
+  // ===== 写入置换表 =====
+  if (bestScore > -INF && (timeLimit === 0 || Date.now() - searchStartTime <= timeLimit)) {
+    tt.store(hash, depth, bestScore, flag, bestMove);
+  }
+
+  return bestScore;
+}
+
+// ---- 杀手/历史启发更新 ----
+function updateKiller(encoded: number, ply: number) {
+  if (killerMoves[ply][0] !== encoded) {
+    killerMoves[ply][1] = killerMoves[ply][0];
+    killerMoves[ply][0] = encoded;
+  }
+}
+
+function updateHistory(encoded: number, depth: number) {
+  const bonus = Math.min(depth * depth, 400);
+  const old = historyTable.get(encoded) ?? 0;
+  const newVal = old + bonus - (old * bonus) / 1024; // 衰减式更新
+  historyTable.set(encoded, newVal);
+
+  if (historyTable.size > MAX_HISTORY) {
+    // 清理过大的历史表
+    const half = historyTable.size >> 1;
+    let count = 0;
+    for (const key of historyTable.keys()) {
+      historyTable.delete(key);
+      if (++count >= half) break;
+    }
+  }
+}
+
+// ========================================================================
+// 公开接口：AI 最佳着法搜索
+// ========================================================================
+export interface SearchConfig {
+  maxDepth: number;
+  timeLimit: number; // ms
+}
+
+/** 找到当前局面下的最佳着法 */
+export function findBestMove(
   state: BoardState,
-  from: Position,
-  to: Position,
-): (Piece | null)[][] {
-  const grid = cloneBoardState(state).grid;
-  const piece = { ...grid[from.row][from.col]! };
-  if (piece.hidden) piece.hidden = false;
-  grid[from.row][from.col] = null;
-  grid[to.row][to.col] = piece;
-  return grid;
+  config: SearchConfig,
+  transpositionTable: TranspositionTable,
+): { from: Position; to: Position } | null {
+  tt = transpositionTable;
+  searchStartTime = Date.now();
+  timeLimit = config.timeLimit;
+  nodesSearched = 0;
+
+  // 重置杀手与历史
+  for (let i = 0; i < 64; i++) killerMoves[i] = [0, 0];
+  historyTable.clear();
+
+  const allMoves = getAllLegalMoves(state);
+  if (allMoves.length === 0) return null;
+  if (allMoves.length === 1) return allMoves[0];
+
+  let bestMove: { from: Position; to: Position } | null = null;
+  let bestScore = -INF;
+
+  // ===== 迭代加深 + 期望窗口 =====
+  for (let depth = 1; depth <= config.maxDepth; depth++) {
+    let alpha = -INF;
+    let beta = INF;
+
+    // 用上一轮最佳分数构建期望窗口
+    if (depth >= 2) {
+      const window = 150;
+      alpha = bestScore - window;
+      beta = bestScore + window;
+    }
+
+    let currentBest: { from: Position; to: Position; encoded: number } | null = null;
+    let currentBestScore = -INF;
+
+    const scored = orderMoves(state.grid, state.currentTurn, allMoves, 0, 0);
+
+    for (const move of scored) {
+      const result = applyMove(state.grid, move.from, move.to);
+      const newTurn = opponentColor(state.currentTurn);
+
+      let score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, 0, true);
+
+      // 窗口失效 → 用全窗口重搜
+      if (score <= alpha || score >= beta) {
+        score = -search(result.grid, newTurn, depth - 1, -INF, INF, 0, true);
+      }
+
+      // 对当前着法估值进行美化：优先走有利于自己颜色的着法
+      if (score > currentBestScore) {
+        currentBestScore = score;
+        currentBest = { from: move.from, to: move.to, encoded: move.encoded };
+      }
+
+      if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
+    }
+
+    if (currentBest) {
+      bestMove = currentBest;
+      bestScore = currentBestScore;
+    }
+
+    // 超时 → 用当前最优着法
+    if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
+
+    // 杀棋 → 无需更深搜索
+    if (Math.abs(bestScore) > MATE_SCORE - 200) break;
+  }
+
+  if (timeLimit > 0) {
+    console.debug(`[AI] depth=${config.maxDepth} nodes=${nodesSearched} time=${Date.now() - searchStartTime}ms ttSize=${tt.size} ttHit=${Math.round(tt.hitRate() * 100)}%`);
+  }
+
+  return bestMove;
 }

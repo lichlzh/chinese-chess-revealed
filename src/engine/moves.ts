@@ -10,6 +10,7 @@ import {
   inBoard, getEffectiveType, opponentColor, findKing,
   cloneGrid, cloneBoardState, getPositionIdentity,
 } from './board';
+import { generateNotation } from './notation';
 
 export type { BoardState };
 /** 获取某位置棋子在指定局面下的所有合法目标位置 */
@@ -250,10 +251,33 @@ function getSlidingMoves(
 
 // ---- 将军检测 ----
 
+/**
+ * 飞将（将帅照面）检测：红黑将/帅在同一列、且中间无任何棋子时为非法局面。
+ * 此时主动走入该局面的一方视为被"将"（可被对方"飞将"吃掉）。
+ */
+export function kingsFaceEachOther(grid: (Piece | null)[][]): boolean {
+  const redKing = findKing(grid, Color.Red);
+  const blackKing = findKing(grid, Color.Black);
+  if (!redKing || !blackKing) return false;
+  if (redKing.col !== blackKing.col) return false;
+
+  const col = redKing.col;
+  const minRow = Math.min(redKing.row, blackKing.row);
+  const maxRow = Math.max(redKing.row, blackKing.row);
+  for (let r = minRow + 1; r < maxRow; r++) {
+    if (grid[r][col]) return false; // 中间有棋子阻隔
+  }
+  return true;
+}
+
 /** 判断指定颜色是否被将军 */
 export function isInCheck(grid: (Piece | null)[][], color: Color): boolean {
   const kingPos = findKing(grid, color);
   if (!kingPos) return true; // 将/帅不在了，当成被将
+
+  // 飞将规则：两将照面即视为被将
+  if (kingsFaceEachOther(grid)) return true;
+
   const enemyColor = opponentColor(color);
 
   for (let r = 0; r < 10; r++) {
@@ -352,6 +376,7 @@ export function executeMove(state: BoardState, from: Position, to: Position): { 
     piece: { ...piece },
     captured,
     revealed: wasHidden ? piece.type : undefined,
+    notation: generateNotation(state.grid, from, to, piece),
   };
 
   // 检测将军/将死

@@ -3,7 +3,9 @@
 // ============================================================
 
 import { useGameStore } from '../stores/gameStore';
+import { useState } from 'react';
 import { GameMode, GameStatus, Color, PieceType, type Piece, type Move } from '../engine/types';
+import { getRepetitionHint } from '../engine/repetition';
 
 const PIECE_NAMES: Record<Color, Record<PieceType, string>> = {
   [Color.Red]: {
@@ -22,8 +24,10 @@ export default function GamePanel() {
   const aiThinking = useGameStore(s => s.aiThinking);
   const newGame = useGameStore(s => s.newGame);
   const undo = useGameStore(s => s.undo);
+  const [showRules, setShowRules] = useState(false);
 
   const statusText = getStatusText(board.status, board.currentTurn, aiThinking, board.endReason);
+  const repHint = getRepetitionHint(board);
 
   return (
     <div style={{
@@ -61,6 +65,22 @@ export default function GamePanel() {
           第 {Math.floor(board.moveHistory.length / 2) + 1} 回合
         </div>
       </div>
+
+      {/* 重复局面 / 长将长捉 预警 */}
+      {board.status === GameStatus.Playing && repHint.level === 'warn' && (
+        <div style={{
+          padding: '10px 12px',
+          background: '#fff4e0',
+          border: '1px solid #e8a33d',
+          borderRadius: '8px',
+          fontSize: '12px',
+          lineHeight: 1.5,
+          color: '#8a5a00',
+          fontFamily: '"KaiTi", "楷体", serif',
+        }}>
+          {repHint.message}
+        </div>
+      )}
 
       {/* 游戏模式选择 */}
       <div style={{ display: 'flex', gap: '8px' }}>
@@ -108,6 +128,14 @@ export default function GamePanel() {
         </button>
       </div>
 
+      {/* 棋规说明入口 */}
+      <button
+        onClick={() => setShowRules(true)}
+        style={{ ...buttonStyle, background: '#5d6d7e', color: '#fff', borderColor: '#5d6d7e' }}
+      >
+        棋规说明
+      </button>
+
       {/* 被吃棋子展示 */}
       <CapturedPieces label="红方损失" pieces={board.redCaptured} color={Color.Red} />
       <CapturedPieces label="黑方损失" pieces={board.blackCaptured} color={Color.Black} />
@@ -142,6 +170,50 @@ export default function GamePanel() {
           })}
         </div>
       </div>
+
+      {/* 棋规说明弹窗 */}
+      {showRules && (
+        <div
+          onClick={() => setShowRules(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(540px, 90vw)', maxHeight: '85vh', overflowY: 'auto',
+              background: '#fff', borderRadius: '14px', padding: '24px 28px',
+              boxShadow: '0 12px 48px rgba(0,0,0,0.25)',
+              fontFamily: '"KaiTi", "楷体", serif',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <h2 style={{ margin: 0, color: '#8b4513', fontSize: '20px' }}>揭棋 · 棋规速览</h2>
+              <button onClick={() => setShowRules(false)} style={{ ...buttonStyle, padding: '4px 12px' }}>关闭</button>
+            </div>
+
+            <div style={{ fontSize: '13px', lineHeight: 1.75, color: '#5a4030' }}>
+              <p style={{ margin: '0 0 10px' }}><b>暗子（翻棋）</b>：开局双方各 15 子暗置，走暗子时翻开真实身份（位置决定其本该是车/马/炮…）。翻面的子即变为明子。</p>
+
+              <p style={{ margin: '0 0 10px' }}><b>胜负</b>：将死或困毙（对方将帅无合法着法）即获胜。双方将帅照面也算被将。</p>
+
+              <p style={{ margin: '0 0 8px' }}><b>重复局面裁决（长将 / 长捉）</b>：同一局面三次重复时触发。</p>
+              <ul style={{ margin: '0 0 10px', paddingLeft: '20px' }}>
+                <li><b>长将</b>：一方连续将军、对方只能应将（不变着）→ 长将方判负。</li>
+                <li><b>长捉</b>：连续捉吃同一枚无根子（含「一将一捉」）→ 长捉方判负。</li>
+                <li><b>和棋</b>：双方均生事、或双方均为不变着（一将一闲等）→ 判和。</li>
+              </ul>
+
+              <p style={{ margin: '0 0 10px' }}><b>其他和棋</b>：连续 60 回合无吃子判和；连续 6 回合同方将军（连将兜底）判和；长拦/长跟等未细分情形保守判和。</p>
+
+              <p style={{ margin: '0' }}><b>AI</b> 已感知以上规则：不会主动长将/长捉自杀，亦能在对方违规时主动制造重复逼胜/逼和。当局面临近重复时，本面板会给出⚠️预警。</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

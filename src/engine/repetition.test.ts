@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { Color } from './types';
-import { judgeCycle, positionKey, REPETITION_LIMIT, type CycleEntry } from './repetition';
+import { Color, PieceType, type Move, type BoardState } from './types';
+import { createPiece } from './board';
+import { judgeCycle, positionKey, REPETITION_LIMIT, getRepetitionHint, type CycleEntry } from './repetition';
 
 const R = Color.Red;
 const B = Color.Black;
@@ -117,5 +118,66 @@ describe('positionKey - 基本正确性', () => {
 describe('常量', () => {
   it('三次重复触发', () => {
     expect(REPETITION_LIMIT).toBe(3);
+  });
+});
+
+describe('getRepetitionHint - UI 预警', () => {
+  function emptyBoard(): BoardState {
+    return {
+      grid: Array.from({ length: 10 }, () => Array.from({ length: 9 }, () => null)),
+      currentTurn: Color.Red,
+      status: 0 as unknown as BoardState['status'],
+      moveHistory: [],
+      redCaptured: [],
+      blackCaptured: [],
+      movesWithoutCapture: 0,
+    };
+  }
+
+  function repMove(key: string, color: Color, isCheck: boolean): Move {
+    return {
+      from: { row: 0, col: 0 },
+      to: { row: 0, col: 1 },
+      piece: createPiece(PieceType.Chariot, color, false),
+      posKeyAfter: key,
+      isCheck,
+      chases: [],
+    } as Move;
+  }
+
+  it('未达重复阈值 → 不提示', () => {
+    const h = getRepetitionHint(emptyBoard());
+    expect(h.level).toBe('none');
+    expect(h.message).toBe('');
+  });
+
+  it('红方长将循环（2 次重复）→ 预警红方长将', () => {
+    const key = positionKey(emptyBoard().grid, Color.Red);
+    const board = emptyBoard();
+    board.moveHistory = [
+      repMove(key, Color.Red, true),
+      repMove(key, Color.Black, false),
+      repMove(key, Color.Red, true),
+      repMove(key, Color.Black, false),
+    ];
+    const h = getRepetitionHint(board);
+    expect(h.level).toBe('warn');
+    expect(h.count).toBeGreaterThanOrEqual(2);
+    expect(h.message).toContain('红方');
+    expect(h.message).toContain('长将');
+  });
+
+  it('双方不变着（2 次重复）→ 预警和棋', () => {
+    const key = positionKey(emptyBoard().grid, Color.Red);
+    const board = emptyBoard();
+    board.moveHistory = [
+      repMove(key, Color.Red, false),
+      repMove(key, Color.Black, false),
+      repMove(key, Color.Red, false),
+      repMove(key, Color.Black, false),
+    ];
+    const h = getRepetitionHint(board);
+    expect(h.level).toBe('warn');
+    expect(h.message).toContain('和棋');
   });
 });

@@ -10,7 +10,7 @@
 //    因此重复检测只需回溯到最近一次吃子/翻子，窗口很短。
 // ============================================================
 
-import { Color, PieceType, type Piece, type Move } from './types';
+import { Color, PieceType, type Piece, type Move, type BoardState } from './types';
 
 /** 同一局面出现该次数即触发重复裁决（三次重复） */
 export const REPETITION_LIMIT = 3;
@@ -162,4 +162,52 @@ export function adjudicateRepetition(moveHistory: Move[]): RepetitionVerdict {
       chases: m.chases ?? [],
     })),
   );
+}
+
+/** UI 用的重复局面预警等级 */
+export type RepetitionLevel = 'none' | 'warn';
+
+/** UI 用的重复局面提示信息 */
+export interface RepetitionHint {
+  /** 当前局面已出现的次数（含本局） */
+  count: number;
+  /** none: 未达预警阈值；warn: 已达预警，再次重复将触发裁决 */
+  level: RepetitionLevel;
+  /** 给玩家看的中文提示 */
+  message: string;
+}
+
+/**
+ * 计算「重复局面」相关的 UI 提示。
+ *
+ * - 同一局面出现 `REPETITION_WARN`(2) 次即开始预警（游戏层要满 `REPETITION_LIMIT`(3) 次才裁决）。
+ * - 预警时尝试推断循环里哪一方在「生事」（长将 / 长捉），以便明确告知玩家。
+ * - 仅做只读推断，不修改任何状态；返回 `level==='none'` 表示无需提示。
+ */
+export function getRepetitionHint(board: BoardState): RepetitionHint {
+  const count = countRepetition(board.moveHistory);
+  if (count < REPETITION_WARN) {
+    return { count, level: 'none', message: '' };
+  }
+
+  const cycle = repetitionCycleMoves(board.moveHistory).map(m => ({
+    side: m.piece.color,
+    kind: classifyMoveKind(m),
+    chases: m.chases ?? [],
+  }));
+  const verdict = judgeCycle(cycle);
+
+  const sideName = (c: Color) => (c === Color.Red ? '红方' : '黑方');
+  let message: string;
+  if (verdict.loser) {
+    const who = sideName(verdict.loser);
+    const kind = verdict.reason.includes('长捉') ? '长捉' : '长将';
+    message = `⚠️ 重复预警（第 ${count} 次）：当前循环内 ${who}涉嫌${kind}，若再次重复将判${who}负。`;
+  } else if (verdict.reason.includes('和棋')) {
+    message = `⚠️ 重复预警（第 ${count} 次）：双方均为不变着，若再次重复将判和棋。`;
+  } else {
+    message = `⚠️ 重复预警（第 ${count} 次）：局面即将三次重复，将触发重复局面裁决。`;
+  }
+
+  return { count, level: 'warn', message };
 }

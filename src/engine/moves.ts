@@ -11,8 +11,16 @@ import {
   cloneGrid, cloneBoardState, getPositionIdentity,
 } from './board';
 import { generateNotation } from './notation';
+import {
+  REPETITION_LIMIT, positionKey, countRepetition, adjudicateRepetition,
+} from './repetition';
 
 export type { BoardState };
+export { REPETITION_LIMIT };
+
+// 棋规常量
+export const PERPETUAL_CHECK_LIMIT = 6;   // 连续将军达此次数直接判"长将"负（重复局面检测的兜底）
+export const NO_CAPTURE_DRAW_PLIES = 60;  // 连续无吃子半回合数达此值判和（=30 回合）
 /** 获取某位置棋子在指定局面下的所有合法目标位置 */
 export function getLegalMoves(state: BoardState, pos: Position): Position[] {
   const piece = state.grid[pos.row][pos.col];
@@ -338,6 +346,105 @@ export function applyMoveToGrid(
   return newGrid;
 }
 
+// ---- 「捉」的判定（用于长捉裁决） ----
+
+/** 捉子判定用的粗略子力价值 */
+const CHASE_VALUE: Record<PieceType, number> = {
+  [PieceType.King]: 10000,
+  [PieceType.Chariot]: 900,
+  [PieceType.Cannon]: 450,
+  [PieceType.Horse]: 400,
+  [PieceType.Elephant]: 200,
+  [PieceType.Advisor]: 200,
+  [PieceType.Pawn]: 100,
+};
+/** 暗子真实身份未知，按期望价值估算 */
+const HIDDEN_CHASE_VALUE = 300;
+
+function chaseWorth(piece: Piece, pos: Position): number {
+  if (piece.hidden) return HIDDEN_CHASE_VALUE;
+  if (piece.type === PieceType.Pawn) {
+    const crossed = piece.color === Color.Red ? pos.row <= 4 : pos.row >= 5;
+    return crossed ? 200 : 100;
+  }
+  return CHASE_VALUE[piece.type];
+}
+
+/** 判断某枚棋子是否受本方保护（有同色子能"吃回"该格） */
+function isDefended(grid: (Piece | null)[][], pos: Position, victimColor: Color): boolean {
+  const g = cloneGrid(grid);
+  const victim = g[pos.row][pos.col];
+  if (!victim) return false;
+  // 把目标临时染成敌色，这样同色子生成走法时才会把该格视为可吃
+  g[pos.row][pos.col] = { ...victim, color: opponentColor(victimColor) };
+
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      if (r === pos.row && c === pos.col) continue;
+      const p = g[r][c];
+      if (!p || p.color !== victimColor) continue;
+      const eff = getEffectiveType(p, { row: r, col: c });
+      if (getRawMoves(p, eff, { row: r, col: c }, g).some(m => samePos(m, pos))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 计算 `attacker` 一方当前"捉"住的对方棋子 id 列表。
+ *
+ * 采用简化但贴近棋规的判据：
+ * - 攻击方能真实吃掉该子（走后本方不被将）
+ * - 目标不是将/帅（那是"将"不是"捉"）
+ * - 目标不是未过河的兵/卒（棋规视为"闲"）
+ * - 攻击子不是帅/将或兵/卒（棋规视为"闲"）
+ * - 目标无保护，或目标价值高于攻击子（否则属于"兑"，算闲）
+ */
+export function computeChases(state: BoardState, attacker: Color): number[] {
+  const grid = state.grid;
+  const defendedCache = new Map<string, boolean>();
+  const chased = new Set<number>();
+
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = grid[r][c];
+      if (!p || p.color !== attacker) continue;
+
+      const from = { row: r, col: c };
+      const eff = getEffectiveType(p, from);
+      // 帅/将、兵/卒 捉子按棋规算"闲"
+      if (eff === PieceType.King || eff === PieceType.Pawn) continue;
+
+      for (const to of getRawMoves(p, eff, from, grid)) {
+        const victim = grid[to.row][to.col];
+        if (!victim || victim.color === attacker) continue;
+        if (chased.has(victim.id)) continue;
+
+        const victimEff = getEffectiveType(victim, to);
+        if (victimEff === PieceType.King) continue;         // 将军不算捉
+        if (victimEff === PieceType.Pawn) {                 // 捉未过河兵算闲
+          const crossed = victim.color === Color.Red ? to.row <= 4 : to.row >= 5;
+          if (!crossed) continue;
+        }
+        // 必须能真的吃掉（走后本方不被将）
+        if (isInCheck(applyMoveToGrid(grid, from, to, p), attacker)) continue;
+
+        const key = `${to.row},${to.col}`;
+        let defended = defendedCache.get(key);
+        if (defended === undefined) {
+          defended = isDefended(grid, to, victim.color);
+          defendedCache.set(key, defended);
+        }
+        // 有根且不占便宜 → 属于"兑"，算闲
+        if (defended && chaseWorth(victim, to) <= chaseWorth(p, from)) continue;
+
+        chased.add(victim.id);
+      }
+    }
+  }
+  return [...chased];
+}
+
 /** 执行完整的一步棋，返回新的 BoardState 和 Move 记录 */
 export function executeMove(state: BoardState, from: Position, to: Position): { newState: BoardState; move: Move } | null {
   const piece = state.grid[from.row][from.col];
@@ -379,31 +486,77 @@ export function executeMove(state: BoardState, from: Position, to: Position): { 
     notation: generateNotation(state.grid, from, to, piece),
   };
 
-  // 检测将军/将死
-  if (isInCheck(newState.grid, newState.currentTurn)) {
-    moveRecord.isCheck = true;
-    if (isCheckmate(newState)) {
-      moveRecord.isCheckmate = true;
-      newState.status = state.currentTurn === Color.Red ? GameStatus.RedWin : GameStatus.BlackWin;
+  // 连续无吃子计数（用于判和）
+  newState.movesWithoutCapture = captured ? 0 : state.movesWithoutCapture + 1;
+
+  // 检测将军 / 将死 / 困毙（轮到走棋的一方无合法着法即判负）
+  const opponentInCheck = isInCheck(newState.grid, newState.currentTurn);
+  if (opponentInCheck) moveRecord.isCheck = true;
+
+  // 局面指纹 + 捉子信息（吃子/翻子不可逆，不参与循环判定，可跳过）
+  moveRecord.posKeyAfter = positionKey(newState.grid, newState.currentTurn);
+  if (!captured && !wasHidden) {
+    moveRecord.chases = computeChases(newState, state.currentTurn);
+  }
+
+  // 先入历史，后续裁决依赖完整历史
+  newState.moveHistory.push(moveRecord);
+
+  if (isCheckmate(newState)) {
+    moveRecord.isCheckmate = opponentInCheck;
+    newState.status = state.currentTurn === Color.Red ? GameStatus.BlackWin : GameStatus.RedWin;
+    newState.endReason = opponentInCheck ? '将死' : '困毙';
+  }
+
+  // 三次重复局面裁决：区分长将 / 长捉 / 和棋
+  if (newState.status === GameStatus.Playing && countRepetition(newState.moveHistory) >= REPETITION_LIMIT) {
+    const verdict = adjudicateRepetition(newState.moveHistory);
+    if (verdict.loser) {
+      newState.status = verdict.loser === Color.Red ? GameStatus.BlackWin : GameStatus.RedWin;
+    } else {
+      newState.status = GameStatus.Draw;
+    }
+    newState.endReason = verdict.reason;
+  }
+
+  // 兜底：连续将军过多（对方每次都有不同应招、未形成重复局面）
+  if (newState.status === GameStatus.Playing) {
+    const longChecker = checkPerpetualCheck(newState);
+    if (longChecker) {
+      newState.status = longChecker === Color.Red ? GameStatus.BlackWin : GameStatus.RedWin;
+      newState.endReason = '长将判负';
     }
   }
 
-  newState.moveHistory.push(moveRecord);
+  // 长时间无吃子判和
+  if (newState.status === GameStatus.Playing && newState.movesWithoutCapture >= NO_CAPTURE_DRAW_PLIES) {
+    newState.status = GameStatus.Draw;
+    newState.endReason = '长时间无吃子，和棋';
+  }
+
   return { newState, move: moveRecord };
 }
 
-/** 检查长将/长捉等违规着法（简化版：检查最近 6 回合） */
-export function isPerpetualCheck(state: BoardState): boolean {
-  const history = state.moveHistory;
-  if (history.length < 6) return false;
+/**
+ * 兜底的"长将"检测：同一方连续将军达 PERPETUAL_CHECK_LIMIT 次即判该方负。
+ * 正常的长将由重复局面裁决处理，这里只覆盖"对方每次应招不同、迟迟不形成
+ * 重复局面"的情况，因此阈值取得较宽，避免误伤正常的连续将军杀法。
+ */
+export function checkPerpetualCheck(state: BoardState): Color | null {
+  const h = state.moveHistory;
+  if (h.length < PERPETUAL_CHECK_LIMIT) return null;
 
-  // 取最近方走的步（跳过当前轮到方）
-  const myMoves = history.filter((_, i) => {
-    return (history.length - i) % 2 === 1;
-  }).slice(-4);
+  const last = h[h.length - 1];
+  if (!last.isCheck) return null; // 必须当前正在将军
+  const checker = last.piece.color;
 
-  if (myMoves.length < 4) return false;
-
-  // 检查是否所有步都是将军
-  return myMoves.every(m => m.isCheck);
+  let count = 0;
+  for (let i = h.length - 1; i >= 0; i--) {
+    const m = h[i];
+    if (m.piece.color !== checker) continue; // 跳过对方着法
+    if (m.isCheck) count++;
+    else break;                              // 该方出现非将军着法，长将中断
+    if (count >= PERPETUAL_CHECK_LIMIT) return checker;
+  }
+  return null;
 }

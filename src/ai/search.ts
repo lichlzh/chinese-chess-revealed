@@ -61,6 +61,7 @@ function makeTempState(grid: (Piece | null)[][], turn: Color): BoardState {
     grid, currentTurn: turn,
     status: 0 as unknown as BoardState['status'],
     moveHistory: [], redCaptured: [], blackCaptured: [],
+    movesWithoutCapture: 0,
   };
 }
 

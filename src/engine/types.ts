@@ -43,6 +43,10 @@ export interface Move {
   isCheck?: boolean;       // 走后是否将军
   isCheckmate?: boolean;   // 走后是否将死
   notation?: string;       // 中文记谱
+  /** 走完这步后的局面指纹（用于重复局面检测） */
+  posKeyAfter?: string;
+  /** 走完这步后，本方"捉住"的对方棋子 id 列表（用于长捉判定） */
+  chases?: number[];
 }
 
 /** 游戏状态 */
@@ -68,6 +72,10 @@ export interface BoardState {
   moveHistory: Move[];
   redCaptured: Piece[];       // 红方被吃的子
   blackCaptured: Piece[];     // 黑方被吃的子
+  /** 连续无吃子的半回合数（用于判和，2 = 1 回合） */
+  movesWithoutCapture: number;
+  /** 终局原因（长将判负 / 无吃子和棋 / 将死 等），仅终局时填充 */
+  endReason?: string;
 }
 
 /** 初始布局中每个位置的"位置身份"（用于暗子第一步走法判定） */

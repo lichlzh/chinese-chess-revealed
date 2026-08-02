@@ -105,6 +105,7 @@ export function initBoard(): BoardState {
     moveHistory: [],
     redCaptured: [],
     blackCaptured: [],
+    movesWithoutCapture: 0,
   };
 }
 
@@ -117,6 +118,8 @@ export function cloneBoardState(state: BoardState): BoardState {
     moveHistory: [...state.moveHistory],
     redCaptured: [...state.redCaptured],
     blackCaptured: [...state.blackCaptured],
+    movesWithoutCapture: state.movesWithoutCapture,
+    endReason: state.endReason,
   };
 }
 

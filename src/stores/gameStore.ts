@@ -151,6 +151,14 @@ export const useGameStore = create<GameStore>((set, get) => ({
       newBoard.currentTurn = opponentColor(newBoard.currentTurn);
     }
 
+    // 还原棋规计数（重复局面靠 moveHistory 现算，无需还原）
+    let noCapture = 0;
+    for (let i = newBoard.moveHistory.length - 1; i >= 0; i--) {
+      if (newBoard.moveHistory[i].captured) break;
+      noCapture++;
+    }
+    newBoard.movesWithoutCapture = noCapture;
+    newBoard.endReason = undefined;
     newBoard.status = GameStatus.Playing;
     set({ board: newBoard, selectedPos: null, legalMoves: [] });
   },

@@ -23,7 +23,7 @@ export default function GamePanel() {
   const newGame = useGameStore(s => s.newGame);
   const undo = useGameStore(s => s.undo);
 
-  const statusText = getStatusText(board.status, board.currentTurn, aiThinking);
+  const statusText = getStatusText(board.status, board.currentTurn, aiThinking, board.endReason);
 
   return (
     <div style={{
@@ -117,11 +117,17 @@ export default function GamePanel() {
         <div style={{ fontSize: '13px', fontWeight: 600, color: '#5a4030', marginBottom: '8px' }}>走子记录</div>
         <div style={{ fontSize: '12px', color: '#8b7355', maxHeight: '160px', overflowY: 'auto' }}>
           {board.moveHistory.length === 0 && <div style={{ opacity: 0.5 }}>暂无记录</div>}
-          {board.moveHistory.map((move: Move, i: number) => (
+          {board.moveHistory.map((move: Move, i: number) => {
+            const isLast = i === board.moveHistory.length - 1;
+            return (
             <div key={i} style={{
-              padding: '3px 0',
+              padding: '3px 6px',
               borderBottom: '1px solid #f0e6d3',
               color: move.piece.color === Color.Red ? '#c0392b' : '#1a5276',
+              background: isLast ? '#fff3e0' : 'transparent',
+              borderLeft: isLast ? '3px solid #e67e22' : '3px solid transparent',
+              borderRadius: isLast ? '4px' : 0,
+              fontWeight: isLast ? 700 : 400,
             }}>
               {Math.floor(i / 2) + 1}. {move.piece.color === Color.Red ? '红' : '黑'}
               {' '}
@@ -132,7 +138,8 @@ export default function GamePanel() {
               {move.isCheck ? ' 将军' : ''}
               {move.isCheckmate ? ' 将死!' : ''}
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -172,15 +179,15 @@ function CapturedPieces({ label, pieces, color }: { label: string; pieces: Piece
   );
 }
 
-function getStatusText(status: GameStatus, currentTurn: Color, aiThinking: boolean): string {
+function getStatusText(status: GameStatus, currentTurn: Color, aiThinking: boolean, endReason?: string): string {
   if (aiThinking) return 'AI 思考中...';
   switch (status) {
     case GameStatus.NotStarted: return '未开始';
     case GameStatus.Playing:
       return currentTurn === Color.Red ? '红方走棋' : '黑方走棋';
-    case GameStatus.RedWin: return '🏆 红方获胜！';
-    case GameStatus.BlackWin: return '🏆 黑方获胜！';
-    case GameStatus.Draw: return '🤝 和棋';
+    case GameStatus.RedWin: return `🏆 红方获胜！${endReason ? `（${endReason}）` : ''}`;
+    case GameStatus.BlackWin: return `🏆 黑方获胜！${endReason ? `（${endReason}）` : ''}`;
+    case GameStatus.Draw: return `🤝 和棋${endReason ? `（${endReason}）` : ''}`;
     default: return '';
   }
 }

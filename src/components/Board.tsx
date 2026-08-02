@@ -185,6 +185,9 @@ function drawBoard(
   ctx.fillText('楚  河', BOARD_PADDING + 2 * CELL_SIZE, BOARD_PADDING + 4.5 * CELL_SIZE);
   ctx.fillText('汉  界', BOARD_PADDING + 6 * CELL_SIZE, BOARD_PADDING + 4.5 * CELL_SIZE);
 
+  // 最近两步的底色高亮（画在棋子下方）
+  drawLastMoveTints(ctx, board);
+
   // 绘制棋子
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {
@@ -219,6 +222,9 @@ function drawBoard(
     }
   }
 
+  // 最近两步的高亮圈 + 移动箭头（画在棋子上方）
+  drawLastMoveMarkers(ctx, board);
+
   // AI 思考中提示
   if (aiThinking) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
@@ -245,6 +251,102 @@ function drawPalaceCross(ctx: CanvasRenderingContext2D, startRow: number, startC
   ctx.moveTo(x2, y1);
   ctx.lineTo(x1, y2);
   ctx.stroke();
+}
+
+// 单元格左上角像素坐标
+function cellTopLeft(row: number, col: number): { x: number; y: number } {
+  return {
+    x: BOARD_PADDING + col * CELL_SIZE - CELL_SIZE / 2,
+    y: BOARD_PADDING + row * CELL_SIZE - CELL_SIZE / 2,
+  };
+}
+
+// 棋格中心像素坐标（模块级，供绘制函数复用）
+function toPixel(row: number, col: number): { x: number; y: number } {
+  return { x: BOARD_PADDING + col * CELL_SIZE, y: BOARD_PADDING + row * CELL_SIZE };
+}
+
+// 对方上一步/上上步的单元格底色（画在棋子下方）
+function drawLastMoveTints(ctx: CanvasRenderingContext2D, board: BoardState) {
+  const h = board.moveHistory;
+  if (!h || h.length === 0) return;
+  const last = h[h.length - 1];
+  const prev = h.length >= 2 ? h[h.length - 2] : null;
+
+  const tint = (pos: { row: number; col: number }, color: string) => {
+    const { x, y } = cellTopLeft(pos.row, pos.col);
+    ctx.fillStyle = color;
+    ctx.fillRect(x + 2, y + 2, CELL_SIZE - 4, CELL_SIZE - 4);
+  };
+  // 上一步（对方）：橙色，强显示
+  tint(last.from, 'rgba(230, 126, 34, 0.22)');
+  tint(last.to, 'rgba(230, 126, 34, 0.32)');
+  // 上上步（自己）：蓝色，弱显示
+  if (prev && prev.piece.color !== last.piece.color) {
+    tint(prev.from, 'rgba(52, 152, 219, 0.12)');
+    tint(prev.to, 'rgba(52, 152, 219, 0.18)');
+  }
+}
+
+// 在棋子上方画高亮圈 + 移动箭头（区分强弱）
+function drawLastMoveMarkers(ctx: CanvasRenderingContext2D, board: BoardState) {
+  const h = board.moveHistory;
+  if (!h || h.length === 0) return;
+  const last = h[h.length - 1];
+  const prev = h.length >= 2 ? h[h.length - 2] : null;
+
+  const marker = (from: Position, to: Position, color: string, strong: boolean) => {
+    const a = toPixel(from.row, from.col);
+    const b = toPixel(to.row, to.col);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = strong ? 4 : 2.5;
+    for (const c of [a, b]) {
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, PIECE_RADIUS + 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    drawArrow(ctx, a, b, color, strong ? 3.5 : 2);
+  };
+  // 上一步（对方）强高亮
+  marker(last.from, last.to, '#e67e22', true);
+  // 上上步（自己）弱高亮
+  if (prev && prev.piece.color !== last.piece.color) {
+    marker(prev.from, prev.to, '#3498db', false);
+  }
+}
+
+function drawArrow(
+  ctx: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  color: string,
+  width: number,
+) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return;
+  const ux = dx / len;
+  const uy = dy / len;
+  const startX = from.x + ux * (PIECE_RADIUS + 6);
+  const startY = from.y + uy * (PIECE_RADIUS + 6);
+  const endX = to.x - ux * (PIECE_RADIUS + 6);
+  const endY = to.y - uy * (PIECE_RADIUS + 6);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(startX, startY);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  const ah = 10;
+  const ang = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(endX, endY);
+  ctx.lineTo(endX - ah * Math.cos(ang - Math.PI / 6), endY - ah * Math.sin(ang - Math.PI / 6));
+  ctx.lineTo(endX - ah * Math.cos(ang + Math.PI / 6), endY - ah * Math.sin(ang + Math.PI / 6));
+  ctx.closePath();
+  ctx.fill();
 }
 
 function drawPiece(

@@ -358,11 +358,15 @@ const CHASE_VALUE: Record<PieceType, number> = {
   [PieceType.Advisor]: 200,
   [PieceType.Pawn]: 100,
 };
-/** 暗子真实身份未知，按期望价值估算 */
+/**
+ * 暗子真实身份未知：其期望价值 = 同色未翻暗子的平均真实价值
+ * （贝叶斯近似——你不知道它是谁，但知道"剩下的暗子里有哪些"）。
+ * HIDDEN_CHASE_VALUE 仅在所有暗子都已翻开时的退化默认值。
+ */
 const HIDDEN_CHASE_VALUE = 300;
 
-function chaseWorth(piece: Piece, pos: Position): number {
-  if (piece.hidden) return HIDDEN_CHASE_VALUE;
+function chaseWorth(piece: Piece, pos: Position, avgHidden: Record<Color, number>): number {
+  if (piece.hidden) return avgHidden[piece.color];
   if (piece.type === PieceType.Pawn) {
     const crossed = piece.color === Color.Red ? pos.row <= 4 : pos.row >= 5;
     return crossed ? 200 : 100;
@@ -405,6 +409,26 @@ export function computeChases(state: BoardState, attacker: Color): number[] {
   const defendedCache = new Map<string, boolean>();
   const chased = new Set<number>();
 
+  // 暗子期望价值：同色未翻暗子的平均真实价值（贝叶斯近似）
+  const avgHidden: Record<Color, number> = {
+    [Color.Red]: HIDDEN_CHASE_VALUE,
+    [Color.Black]: HIDDEN_CHASE_VALUE,
+  };
+  {
+    const sum: Record<Color, { v: number; n: number }> = {
+      [Color.Red]: { v: 0, n: 0 },
+      [Color.Black]: { v: 0, n: 0 },
+    };
+    for (let r = 0; r < 10; r++) {
+      for (let c = 0; c < 9; c++) {
+        const p = grid[r][c];
+        if (p && p.hidden) { sum[p.color].v += CHASE_VALUE[p.type]; sum[p.color].n++; }
+      }
+    }
+    if (sum[Color.Red].n > 0) avgHidden[Color.Red] = sum[Color.Red].v / sum[Color.Red].n;
+    if (sum[Color.Black].n > 0) avgHidden[Color.Black] = sum[Color.Black].v / sum[Color.Black].n;
+  }
+
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {
       const p = grid[r][c];
@@ -436,7 +460,7 @@ export function computeChases(state: BoardState, attacker: Color): number[] {
           defendedCache.set(key, defended);
         }
         // 有根且不占便宜 → 属于"兑"，算闲
-        if (defended && chaseWorth(victim, to) <= chaseWorth(p, from)) continue;
+        if (defended && chaseWorth(victim, to, avgHidden) <= chaseWorth(p, from, avgHidden)) continue;
 
         chased.add(victim.id);
       }

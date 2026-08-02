@@ -5,7 +5,8 @@
 import { Color, PieceType, type Position, type Piece } from '../engine/types';
 import { cloneGridFast, samePos } from '../engine/utils';
 import { opponentColor, getEffectiveType, findKing } from '../engine/board';
-import { getAllLegalMoves, isInCheck, type BoardState } from '../engine/moves';
+import { getAllLegalMoves, isInCheck, computeChases, type BoardState } from '../engine/moves';
+import { positionKey, REPETITION_LIMIT, judgeCycle, type MoveKind } from '../engine/repetition';
 import { evaluateBoard, getPieceValueSimple, PIECE_VALUES } from './evaluate';
 import { TranspositionTable, TTFlag } from './tt';
 import { computeHash } from './zobrist';
@@ -63,6 +64,65 @@ function makeTempState(grid: (Piece | null)[][], turn: Color): BoardState {
     moveHistory: [], redCaptured: [], blackCaptured: [],
     movesWithoutCapture: 0,
   };
+}
+
+/** 搜索路径上的「边」：从父节点走一步到达子节点局面 */
+export interface PathEntry {
+  key: string;       // 子节点局面指纹
+  side: Color;       // 走这步的一方
+  kind: MoveKind;    // 这步的性质（将 / 捉 / 闲）
+  chases: number[];  // 这步捉住的对方棋子 id
+}
+
+/**
+ * 判断「走完某一步后」这步棋的性质，用于搜索树内的循环裁决。
+ *
+ * 成本控制：
+ * - 将军（isChk）极便宜，直接判定；
+ * - 仅当该局面之前已在搜索路径上出现过（即将形成循环）时，才调用较重的
+ *   computeChases 精确判定「捉」——循环分支会立即被裁决剪枝，不会深展开；
+ * - 否则（首次到达且非将军）保守判「闲」。方向保守：宁可漏判长捉为和棋，
+ *   也不误判 AI 主动走入长捉被判负（最坏只是没占到规则便宜）。
+ */
+function moveKindAfter(
+  grid: (Piece | null)[][], turn: Color, newTurn: Color,
+  isChk: boolean, alreadyInPath: boolean,
+): { kind: MoveKind; chases: number[] } {
+  if (isChk) return { kind: 'check', chases: [] };
+  if (alreadyInPath) {
+    const chases = computeChases(makeTempState(grid, newTurn), turn);
+    return { kind: chases.length > 0 ? 'chase' : 'idle', chases };
+  }
+  return { kind: 'idle', chases: [] };
+}
+
+/**
+ * 搜索路径上的重复裁决打分（供 search 复用，亦可单测）。
+ *
+ * @param currentKey 当前节点局面指纹
+ * @param path       当前 DFS 路径（祖先节点序列）
+ * @returns 触发裁决时返回对应分数（判负方为负的大分，和棋为 0）；
+ *          未达重复次数时返回 null。
+ */
+export function repetitionScore(
+  currentKey: string,
+  path: PathEntry[],
+  turn: Color,
+  ply: number,
+): number | null {
+  let reps = 0;
+  let firstIdx = -1;
+  for (let i = 0; i < path.length; i++) {
+    if (path[i].key === currentKey) {
+      if (firstIdx < 0) firstIdx = i;
+      reps++;
+    }
+  }
+  if (reps < REPETITION_LIMIT) return null;
+
+  const verdict = judgeCycle(path.slice(firstIdx + 1));
+  if (verdict.loser === null) return DRAW_SCORE;
+  return verdict.loser === turn ? -(MATE_SCORE - ply) : (MATE_SCORE - ply);
 }
 
 // ---- 静态搜索（Quiescence Search） ----
@@ -194,12 +254,23 @@ function search(
   beta: number,
   ply: number,
   isPV: boolean,
+  path: PathEntry[] = [],
+  repetitionAware: boolean = true,
 ): number {
   nodesSearched++;
 
   // 超时检测（每 64 个节点检测一次）
   if (timeLimit > 0 && (nodesSearched & 63) === 0 && Date.now() - searchStartTime > timeLimit) {
     return 0;
+  }
+
+  // ===== 重复局面裁决（长将 / 长捉 感知）=====
+  // 一旦路径上同一局面出现满 REPETITION_LIMIT 次，立即按棋规裁决，
+  // 相当于对「走入被判负循环」的分支剪枝——AI 既不会主动长将自杀，
+  // 也能在对方违规时主动制造重复逼胜。
+  if (repetitionAware) {
+    const verdictScore = repetitionScore(positionKey(grid, turn), path, turn, ply);
+    if (verdictScore !== null) return verdictScore;
   }
 
   // ===== 置换表探测 =====
@@ -241,8 +312,8 @@ function search(
     }
   }
 
-  // ===== 空着裁剪 =====
-  if (!isPV && !isInCheck(grid, turn) && depth >= MIN_NULL_DEPTH) {
+  // ===== 空着裁剪（重复感知模式下关闭，避免路径错位误判循环）=====
+  if (!repetitionAware && !isPV && !isInCheck(grid, turn) && depth >= MIN_NULL_DEPTH) {
     // 检查是否有足够子力（避免入局误判）
     let pc = 0;
     for (let r = 0; r < 10; r++)
@@ -267,19 +338,30 @@ function search(
   for (const move of scored) {
     const result = applyMove(grid, move.from, move.to);
     const newTurn = opponentColor(turn);
+
+    // 记录这条「边」到搜索路径（用于重复局面裁决）
+    const newKey = positionKey(result.grid, newTurn);
+    const isChk = isInCheck(result.grid, newTurn);
+    let alreadyInPath = false;
+    for (const e of path) if (e.key === newKey) { alreadyInPath = true; break; }
+    const { kind, chases } = moveKindAfter(result.grid, turn, newTurn, isChk, alreadyInPath);
+    path.push({ key: newKey, side: turn, kind, chases });
+
     let score: number;
 
     if (first) {
-      score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, isPV);
+      score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, isPV, path, repetitionAware);
       first = false;
     } else {
       // 零窗口搜索
-      score = -search(result.grid, newTurn, depth - 1, -alpha - 1, -alpha, ply + 1, false);
+      score = -search(result.grid, newTurn, depth - 1, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware);
       // 窗口失效 → 重新完整搜索
       if (score > alpha && score < beta) {
-        score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, true);
+        score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, true, path, repetitionAware);
       }
     }
+
+    path.pop();
 
     if (score > bestScore) {
       bestScore = score;
@@ -388,12 +470,13 @@ export function findBestMove(
     for (const move of scored) {
       const result = applyMove(state.grid, move.from, move.to);
       const newTurn = opponentColor(state.currentTurn);
+      const path: PathEntry[] = [];
 
-      let score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, 0, true);
+      let score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, 0, true, path, true);
 
       // 窗口失效 → 用全窗口重搜
       if (score <= alpha || score >= beta) {
-        score = -search(result.grid, newTurn, depth - 1, -INF, INF, 0, true);
+        score = -search(result.grid, newTurn, depth - 1, -INF, INF, 0, true, path, true);
       }
 
       // 对当前着法估值进行美化：优先走有利于自己颜色的着法

@@ -9,6 +9,7 @@ import {
   opponentColor,
   cloneBoardState,
   cloneGrid,
+  isCapturedRevealed,
 } from './board';
 
 function emptyGrid(): any {
@@ -110,5 +111,60 @@ describe('cloneBoardState / cloneGrid - 深拷贝', () => {
     const c = cloneGrid(g);
     c[0][0] = null;
     expect(g[0][0]).not.toBeNull();
+  });
+});
+
+describe('initBoard - 暗子身份随机性（出车概率校验）', () => {
+  it('各兵种在全部暗子位置上近似服从 15 子构成比例，无整体偏向', () => {
+    const N = 4000;
+    const counts: Record<string, number> = {};
+    for (let i = 0; i < N; i++) {
+      const b = initBoard();
+      for (const row of b.grid) {
+        for (const p of row) {
+          if (p && p.hidden) counts[p.type] = (counts[p.type] ?? 0) + 1;
+        }
+      }
+    }
+    const total = Object.values(counts).reduce((a, x) => a + x, 0);
+    const expected: Record<string, number> = {
+      [PieceType.Chariot]: 2 / 15,
+      [PieceType.Horse]: 2 / 15,
+      [PieceType.Cannon]: 2 / 15,
+      [PieceType.Elephant]: 2 / 15,
+      [PieceType.Advisor]: 2 / 15,
+      [PieceType.Pawn]: 5 / 15,
+    };
+    for (const t of Object.keys(expected) as PieceType[]) {
+      const prop = (counts[t] ?? 0) / total;
+      expect(Math.abs(prop - expected[t])).toBeLessThan(0.02);
+    }
+    // 特别强调：车的真实比例 ≈ 2/15，而非偏高
+    expect(Math.abs((counts[PieceType.Chariot] ?? 0) / total - 2 / 15)).toBeLessThan(0.02);
+  });
+
+  it('特定位置（(9,0)）的车概率 ≈ 2/15，与各位置一致（无位置偏向）', () => {
+    const N = 4000;
+    let chariot = 0, total = 0;
+    for (let i = 0; i < N; i++) {
+      const b = initBoard();
+      const p = b.grid[9][0];
+      if (p && p.hidden) { total++; if (p.type === PieceType.Chariot) chariot++; }
+    }
+    expect(total).toBe(N); // 该位置恒为暗子
+    expect(Math.abs(chariot / total - 2 / 15)).toBeLessThan(0.02);
+  });
+});
+
+describe('isCapturedRevealed - 被吃暗子身份保密', () => {
+  it('暗子在进行中保密、终局揭晓', () => {
+    const hidden = createPiece(PieceType.Chariot, Color.Black, true);
+    expect(isCapturedRevealed(hidden, false)).toBe(false); // 进行中隐藏
+    expect(isCapturedRevealed(hidden, true)).toBe(true);   // 终局揭晓
+  });
+  it('已翻明的子无论是否终局都展示', () => {
+    const revealed = createPiece(PieceType.Horse, Color.Red, false);
+    expect(isCapturedRevealed(revealed, false)).toBe(true);
+    expect(isCapturedRevealed(revealed, true)).toBe(true);
   });
 });

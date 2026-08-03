@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Color, PieceType, type Move, type BoardState } from './types';
 import { createPiece } from './board';
-import { judgeCycle, positionKey, REPETITION_LIMIT, getRepetitionHint, type CycleEntry } from './repetition';
+import { judgeCycle, positionKey, REPETITION_LIMIT, getRepetitionHint, adjudicateRepetition, type CycleEntry } from './repetition';
 
 const R = Color.Red;
 const B = Color.Black;
@@ -179,5 +179,56 @@ describe('getRepetitionHint - UI 预警', () => {
     const h = getRepetitionHint(board);
     expect(h.level).toBe('warn');
     expect(h.message).toContain('和棋');
+  });
+});
+
+describe('adjudicateRepetition - 长将判负 vs 不变作和（端到端）', () => {
+  const K = 'dummy-w'; // 任意相同的局面指纹
+  function m(key: string, color: Color, isCheck: boolean, chases: number[] = []): Move {
+    return {
+      from: { row: 0, col: 0 },
+      to: { row: 0, col: 1 },
+      piece: createPiece(PieceType.Chariot, color, false),
+      posKeyAfter: key,
+      isCheck,
+      chases,
+    } as Move;
+  }
+
+  it('三重复 + 红长将（黑闲躲）→ 红判负（长将判负）', () => {
+    const v = adjudicateRepetition([
+      m(K, R, true), m(K, B, false),
+      m(K, R, true), m(K, B, false),
+      m(K, R, true), m(K, B, false),
+    ]);
+    expect(v.loser).toBe(R);
+    expect(v.reason).toContain('长将');
+  });
+
+  it('三重复 + 双方均不变着（全闲）→ 和棋（不变作和）', () => {
+    const v = adjudicateRepetition([
+      m(K, R, false), m(K, B, false),
+      m(K, R, false), m(K, B, false),
+      m(K, R, false), m(K, B, false),
+    ]);
+    expect(v.loser).toBeNull();
+    expect(v.reason).toContain('和棋');
+  });
+
+  it('同一循环：红长将判负 与 红含一步闲着判和 —— 明确区分', () => {
+    const foul = adjudicateRepetition([
+      m(K, R, true), m(K, B, false),
+      m(K, R, true), m(K, B, false),
+      m(K, R, true), m(K, B, false),
+    ]);
+    const draw = adjudicateRepetition([
+      m(K, R, true), m(K, B, false),
+      m(K, R, false), m(K, B, false),
+      m(K, R, true), m(K, B, false),
+    ]);
+    expect(foul.loser).toBe(R);
+    expect(foul.reason).toContain('长将');
+    expect(draw.loser).toBeNull();
+    expect(draw.reason).toContain('和棋');
   });
 });

@@ -128,6 +128,15 @@ export function cloneGrid(grid: (Piece | null)[][]): (Piece | null)[][] {
   return grid.map(row => row.map(cell => cell ? { ...cell } : null));
 }
 
+/**
+ * 被吃掉的暗子是否应向玩家显示真实身份：
+ * 只有该子已经翻开过（hidden=false），或棋局已结束（gameOver）才展示，
+ * 否则在棋局进行中对其真实身份保密（显示为「?」）。
+ */
+export function isCapturedRevealed(piece: Piece, gameOver: boolean): boolean {
+  return !piece.hidden || gameOver;
+}
+
 /** 获取棋盘上某位置的身份（用于暗子走法判定） */
 export function getPositionIdentity(pos: Position): PieceType | undefined {
   return POSITION_IDENTITY[posKey(pos.row, pos.col)];

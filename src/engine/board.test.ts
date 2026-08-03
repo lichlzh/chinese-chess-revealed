@@ -156,15 +156,19 @@ describe('initBoard - 暗子身份随机性（出车概率校验）', () => {
   });
 });
 
-describe('isCapturedRevealed - 被吃暗子身份保密', () => {
-  it('暗子在进行中保密、终局揭晓', () => {
-    const hidden = createPiece(PieceType.Chariot, Color.Black, true);
-    expect(isCapturedRevealed(hidden, false)).toBe(false); // 进行中隐藏
-    expect(isCapturedRevealed(hidden, true)).toBe(true);   // 终局揭晓
+describe('isCapturedRevealed - 被吃暗子身份保密（吃子方可知，被吃方不可知）', () => {
+  it('被吃方(原属方)进行中看不到，终局才揭晓', () => {
+    const hidden = createPiece(PieceType.Chariot, Color.Black, true); // 黑子被红吃
+    expect(isCapturedRevealed(hidden, Color.Black, false)).toBe(false); // 黑方(被吃方)视角：保密
+    expect(isCapturedRevealed(hidden, Color.Black, true)).toBe(true);   // 终局揭晓
   });
-  it('已翻明的子无论是否终局都展示', () => {
+  it('吃子方(对方)立即知道被吃暗子身份', () => {
+    const hidden = createPiece(PieceType.Chariot, Color.Black, true); // 黑子被红吃
+    expect(isCapturedRevealed(hidden, Color.Red, false)).toBe(true);   // 红方(吃子方)视角：揭晓
+  });
+  it('已翻明的子无论视角/是否终局都展示', () => {
     const revealed = createPiece(PieceType.Horse, Color.Red, false);
-    expect(isCapturedRevealed(revealed, false)).toBe(true);
-    expect(isCapturedRevealed(revealed, true)).toBe(true);
+    expect(isCapturedRevealed(revealed, Color.Black, false)).toBe(true);
+    expect(isCapturedRevealed(revealed, Color.Red, true)).toBe(true);
   });
 });

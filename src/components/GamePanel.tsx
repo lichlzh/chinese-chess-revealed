@@ -22,6 +22,7 @@ const PIECE_NAMES: Record<Color, Record<PieceType, string>> = {
 export default function GamePanel() {
   const board = useGameStore(s => s.board);
   const gameMode = useGameStore(s => s.gameMode);
+  const playerColor = useGameStore(s => s.playerColor);
   const aiThinking = useGameStore(s => s.aiThinking);
   const newGame = useGameStore(s => s.newGame);
   const undo = useGameStore(s => s.undo);
@@ -139,8 +140,8 @@ export default function GamePanel() {
       </button>
 
       {/* 被吃棋子展示 */}
-      <CapturedPieces label="红方损失" pieces={board.redCaptured} color={Color.Red} gameOver={gameOver} />
-      <CapturedPieces label="黑方损失" pieces={board.blackCaptured} color={Color.Black} gameOver={gameOver} />
+      <CapturedPieces label="红方损失" pieces={board.redCaptured} color={Color.Red} viewerColor={playerColor} gameOver={gameOver} />
+      <CapturedPieces label="黑方损失" pieces={board.blackCaptured} color={Color.Black} viewerColor={playerColor} gameOver={gameOver} />
 
       {/* 走子记录 */}
       <div style={{ flex: 1, overflow: 'auto' }}>
@@ -164,7 +165,7 @@ export default function GamePanel() {
               {PIECE_NAMES[move.piece.color]?.[move.piece.type] ?? '?'}
               {move.revealed ? `(${PIECE_NAMES[move.piece.color]?.[move.revealed] ?? '?'})` : ''}
               {' → '}
-              {move.captured ? `吃${isCapturedRevealed(move.captured, gameOver) ? (PIECE_NAMES[move.captured.color]?.[move.captured.type] ?? '?') : '?'}` : ''}
+              {move.captured ? `吃${isCapturedRevealed(move.captured, playerColor, gameOver) ? (PIECE_NAMES[move.captured.color]?.[move.captured.type] ?? '?') : '?'}` : ''}
               {move.isCheck ? ' 将军' : ''}
               {move.isCheckmate ? ' 将死!' : ''}
             </div>
@@ -200,7 +201,7 @@ export default function GamePanel() {
             <div style={{ fontSize: '13px', lineHeight: 1.75, color: '#5a4030' }}>
               <p style={{ margin: '0 0 10px' }}><b>暗子（翻棋）</b>：开局双方各 15 子暗置，走暗子时翻开真实身份（位置决定其本该是车/马/炮…）。翻面的子即变为明子。</p>
 
-              <p style={{ margin: '0 0 10px' }}><b>被吃暗子保密</b>：被吃掉的暗子（未及翻开者）其真实身份在棋局进行中保密，显示为「?」；直到棋局结束才向双方揭晓。</p>
+              <p style={{ margin: '0 0 10px' }}><b>被吃暗子保密</b>：被吃掉的暗子（未及翻开者）其真实身份，<b>吃子方（对方）立即知悉</b>，但<b>被吃方（原属方）在棋局结束前看不到</b>（显示为「?」）。已翻明的子被吃则照常显示。</p>
 
               <p style={{ margin: '0 0 10px' }}><b>胜负</b>：将死或困毙（对方将帅无合法着法）即获胜。双方将帅照面也算被将。</p>
 
@@ -222,17 +223,20 @@ export default function GamePanel() {
   );
 }
 
-function CapturedPieces({ label, pieces, color, gameOver }: { label: string; pieces: Piece[]; color: Color; gameOver: boolean }) {
+function CapturedPieces({ label, pieces, color, viewerColor, gameOver }: { label: string; pieces: Piece[]; color: Color; viewerColor: Color; gameOver: boolean }) {
   return (
     <div>
       <div style={{ fontSize: '12px', fontWeight: 600, color: '#5a4030', marginBottom: '4px' }}>{label}</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', minHeight: '24px' }}>
         {pieces.map(p => {
-          const revealed = isCapturedRevealed(p, gameOver);
+          const revealed = isCapturedRevealed(p, viewerColor, gameOver);
           const name = revealed ? (PIECE_NAMES[color]?.[p.type] ?? '?') : '?';
           const textColor = color === Color.Red ? '#c0392b' : '#1a5276';
           return (
-            <span key={p.id} style={{
+            <span
+              key={p.id}
+              title={revealed ? '' : '被吃暗子：吃子方已知，被吃方(原属方)终局前保密'}
+              style={{
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',

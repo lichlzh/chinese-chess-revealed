@@ -129,12 +129,13 @@ export function cloneGrid(grid: (Piece | null)[][]): (Piece | null)[][] {
 }
 
 /**
- * 被吃掉的暗子是否应向玩家显示真实身份：
- * 只有该子已经翻开过（hidden=false），或棋局已结束（gameOver）才展示，
- * 否则在棋局进行中对其真实身份保密（显示为「?」）。
+ * 被吃掉的暗子是否应向「查看方」显示真实身份：
+ * - 该子已经翻开过（hidden=false）→ 始终显示；
+ * - 棋局已结束（gameOver）→ 双方都揭晓；
+ * - 否则看查看方是谁：查看方是「吃子方（对方）」即揭晓，是被吃方（原属方）则保密。
  */
-export function isCapturedRevealed(piece: Piece, gameOver: boolean): boolean {
-  return !piece.hidden || gameOver;
+export function isCapturedRevealed(piece: Piece, viewerColor: Color, gameOver: boolean): boolean {
+  return !piece.hidden || gameOver || piece.color !== viewerColor;
 }
 
 /** 获取棋盘上某位置的身份（用于暗子走法判定） */

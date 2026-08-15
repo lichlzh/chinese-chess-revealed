@@ -163,10 +163,14 @@ export function findKing(grid: (Piece | null)[][], color: Color): Position | nul
 
 /**
  * 获取某位置棋子的有效走法类型。
- * 随机洗牌派：暗子（hidden）的真实身份由其随机分配的 type 决定，
- * 翻开前按真实 type 走/判定（与翻面后一致），不依赖位置身份。
+ * 揭棋（随机洗牌派）规则：暗子（hidden）按「位置身份」走/判定，
+ * 翻开（hidden=false）后才按真实随机分配的 type。这样既保持随机洗牌，
+ * 又不会让任一方从走法反推出暗子的真实身份。
  */
-export function getEffectiveType(piece: Piece, _pos: Position): PieceType {
+export function getEffectiveType(piece: Piece, pos: Position): PieceType {
+  if (piece.hidden) {
+    return getPositionIdentity(pos) ?? piece.type;
+  }
   return piece.type;
 }
 

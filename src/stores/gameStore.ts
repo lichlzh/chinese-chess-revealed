@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { Color, GameStatus, GameMode, type Position, type Piece } from '../engine/types';
 import { initBoard, opponentColor, cloneBoardState } from '../engine/board';
+import { buildGameRecord } from '../engine/record';
 import { getLegalMoves, executeMove, getAllLegalMoves } from '../engine/moves';
 import { samePos } from '../engine/utils';
 import type { BoardState } from '../engine/moves';
@@ -23,7 +24,7 @@ interface GameStore {
   aiRequestId: number;
 
   // Actions
-  newGame: (mode: GameMode) => void;
+  newGame: (mode: GameMode, playerColor?: Color) => void;
   selectPiece: (pos: Position) => void;
   movePiece: (to: Position) => void;
   undo: () => void;
@@ -33,6 +34,7 @@ interface GameStore {
   getPieceAt: (pos: Position) => Piece | null;
   getLegalMovesFor: (pos: Position) => Position[];
   cleanup: () => void;
+  exportGameRecord: () => string;
 }
 
 export const useGameStore = create<GameStore>((set, get) => ({
@@ -45,7 +47,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
   aiWorker: null,
   aiRequestId: 0,
 
-  newGame: (mode: GameMode) => {
+  newGame: (mode: GameMode, playerColor: Color = Color.Red) => {
     const board = initBoard();
 
     // 清理旧 Worker
@@ -63,7 +65,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set({
       board,
       gameMode: mode,
-      playerColor: Color.Red,
+      playerColor,
       selectedPos: null,
       legalMoves: [],
       aiThinking: false,
@@ -71,8 +73,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
       aiRequestId: 0,
     });
 
-    // AI 先手（黑方先走）
-    if (mode === GameMode.PvAI && board.currentTurn === Color.Black) {
+    // 若当前轮到 AI（即玩家执后手），让 AI 先走
+    if (mode === GameMode.PvAI && board.currentTurn !== playerColor) {
       setTimeout(() => get().requestAIMove(), 500);
     }
   },
@@ -260,6 +262,16 @@ export const useGameStore = create<GameStore>((set, get) => ({
       aiWorker.terminate();
       set({ aiWorker: null });
     }
+  },
+
+  exportGameRecord: () => {
+    const { board, gameMode, playerColor } = get();
+    return buildGameRecord(board, {
+      mode: gameMode,
+      playerColor,
+      status: board.status,
+      endReason: board.endReason,
+    });
   },
 }));
 

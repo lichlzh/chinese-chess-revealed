@@ -5,6 +5,8 @@
 import { findBestMove } from './search';
 import { TranspositionTable } from './tt';
 import type { BoardState } from '../engine/moves';
+import { getPositionIdentity } from '../engine/board';
+import type { Piece } from '../engine/types';
 
 interface SearchRequest {
   id: number;
@@ -26,6 +28,24 @@ interface ClearRequest {
 /** 持久化置换表：在同一次对局中复用 */
 const tt = new TranspositionTable();
 
+/**
+ * 脱敏：把棋盘上所有暗子的真实随机兵种替换成公开的「位置身份」。
+ * 揭棋规则下，暗子翻开前任一方（包括 AI 自己）都不应知道其真实身份，
+ * 因此搜索时只暴露位置身份这一公开信息。这样即便搜索/评估中任何代码读取
+ * piece.type，拿到的也只是公开信息，AI 在物理上无法偷看暗子身份。
+ */
+function sanitizeState(state: BoardState): BoardState {
+  const grid = state.grid.map((row, r) =>
+    row.map((cell, c): Piece | null => {
+      if (!cell) return null;
+      if (!cell.hidden) return { ...cell };
+      const identity = getPositionIdentity({ row: r, col: c });
+      return { ...cell, type: identity ?? cell.type };
+    }),
+  );
+  return { ...state, grid };
+}
+
 self.onmessage = (e: MessageEvent<SearchRequest | ClearRequest>) => {
   const msg = e.data;
 
@@ -35,7 +55,7 @@ self.onmessage = (e: MessageEvent<SearchRequest | ClearRequest>) => {
   }
 
   if (msg.type === 'search') {
-    const result = findBestMove(msg.state, msg.config, tt);
+    const result = findBestMove(sanitizeState(msg.state), msg.config, tt);
     const response: SearchResponse = {
       id: msg.id,
       type: 'result',

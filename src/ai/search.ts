@@ -154,7 +154,7 @@ function quiescence(
   for (const m of allMoves) {
     const victim = grid[m.to.row][m.to.col];
     if (victim) {
-      captures.push({ ...m, victimVal: getPieceValueSimple(victim.type) });
+      captures.push({ ...m, victimVal: victim.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(victim.type) });
     }
   }
 
@@ -222,7 +222,7 @@ function orderMoves(
 
       if (victim) {
         // MVV-LVA 吃子排序
-        const victimVal = getPieceValueSimple(victim.type);
+        const victimVal = victim.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(victim.type);
         const attackerVal = attacker?.hidden
           ? HIDDEN_PIECE_VALUE
           : getPieceValueSimple(attacker?.type ?? PieceType.Pawn);

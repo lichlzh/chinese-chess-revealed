@@ -26,7 +26,10 @@ export default function GamePanel() {
   const aiThinking = useGameStore(s => s.aiThinking);
   const newGame = useGameStore(s => s.newGame);
   const undo = useGameStore(s => s.undo);
+  const exportGameRecord = useGameStore(s => s.exportGameRecord);
   const [showRules, setShowRules] = useState(false);
+  const [recordText, setRecordText] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const statusText = getStatusText(board.status, board.currentTurn, aiThinking, board.endReason);
   const repHint = getRepetitionHint(board);
@@ -111,10 +114,25 @@ export default function GamePanel() {
         </button>
       </div>
 
+      {/* 人机：交换先后手 */}
+      {gameMode === GameMode.PvAI && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={{ fontSize: '12px', color: '#8b7355', textAlign: 'center' }}>
+            玩家执{playerColor === Color.Red ? '红方 · 先手' : '黑方 · 后手'}
+          </div>
+          <button
+            onClick={() => newGame(GameMode.PvAI, playerColor === Color.Red ? Color.Black : Color.Red)}
+            style={{ ...buttonStyle, background: '#8e44ad', color: '#fff', borderColor: '#8e44ad' }}
+          >
+            交换先后手
+          </button>
+        </div>
+      )}
+
       {/* 操作按钮 */}
       <div style={{ display: 'flex', gap: '8px' }}>
         <button
-          onClick={() => newGame(gameMode)}
+          onClick={() => newGame(gameMode, playerColor)}
           style={{ ...buttonStyle, flex: 1, background: '#27ae60', color: '#fff', borderColor: '#27ae60' }}
         >
           新游戏
@@ -130,6 +148,19 @@ export default function GamePanel() {
           悔棋
         </button>
       </div>
+
+      {/* 导出棋谱 */}
+      <button
+        onClick={() => setRecordText(exportGameRecord())}
+        disabled={board.moveHistory.length === 0}
+        style={{
+          ...buttonStyle,
+          background: '#16a085', color: '#fff', borderColor: '#16a085',
+          opacity: board.moveHistory.length === 0 ? 0.5 : 1,
+        }}
+      >
+        导出棋谱
+      </button>
 
       {/* 棋规说明入口 */}
       <button
@@ -215,6 +246,73 @@ export default function GamePanel() {
               <p style={{ margin: '0 0 10px' }}><b>其他和棋</b>：连续 60 回合无吃子判和；连续 6 回合同方将军（连将兜底）判和；长拦/长跟等未细分情形保守判和。</p>
 
               <p style={{ margin: '0' }}><b>AI</b> 已感知以上规则：不会主动长将/长捉自杀，亦能在对方违规时主动制造重复逼胜/逼和。当局面临近重复时，本面板会给出⚠️预警。</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 棋谱导出弹窗 */}
+      {recordText !== null && (
+        <div
+          onClick={() => setRecordText(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 'min(560px, 92vw)', maxHeight: '85vh', overflowY: 'auto',
+              background: '#fff', borderRadius: '14px', padding: '24px 28px',
+              boxShadow: '0 12px 48px rgba(0,0,0,0.25)',
+              fontFamily: '"KaiTi", "楷体", serif',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <h2 style={{ margin: 0, color: '#8b4513', fontSize: '20px' }}>棋谱导出</h2>
+              <button onClick={() => setRecordText(null)} style={{ ...buttonStyle, padding: '4px 12px' }}>关闭</button>
+            </div>
+            <textarea
+              readOnly
+              value={recordText}
+              style={{
+                width: '100%', height: '300px', resize: 'vertical',
+                boxSizing: 'border-box', padding: '10px',
+                fontSize: '13px', lineHeight: 1.6, color: '#333',
+                border: '1px solid #d5c4a1', borderRadius: '8px',
+                fontFamily: 'monospace', whiteSpace: 'pre',
+              }}
+            />
+            <div style={{ display: 'flex', gap: '8px', marginTop: '14px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(recordText).then(
+                    () => { setCopied(true); setTimeout(() => setCopied(false), 1500); },
+                    () => {},
+                  );
+                }}
+                style={{ ...buttonStyle, background: '#27ae60', color: '#fff', borderColor: '#27ae60' }}
+              >
+                {copied ? '已复制!' : '复制'}
+              </button>
+              <button
+                onClick={() => {
+                  const blob = new Blob([recordText], { type: 'text/plain;charset=utf-8' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = `揭棋棋谱_${Date.now()}.txt`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+                style={{ ...buttonStyle, background: '#8b4513', color: '#fff', borderColor: '#8b4513' }}
+              >
+                下载 .txt
+              </button>
             </div>
           </div>
         </div>

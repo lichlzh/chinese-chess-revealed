@@ -51,19 +51,26 @@ export default function Board() {
   const selectedPos = useGameStore(s => s.selectedPos);
   const legalMoves = useGameStore(s => s.legalMoves);
   const aiThinking = useGameStore(s => s.aiThinking);
+  const playerColor = useGameStore(s => s.playerColor);
+  // 玩家执黑时翻转棋盘，保证玩家棋子始终在屏幕下方
+  const flipped = playerColor === Color.Black;
 
-  // 坐标转换
+  // 坐标转换（flipped 时做 180° 旋转：row→9-row，col→8-col）
   const boardToPixel = useCallback((row: number, col: number): { x: number; y: number } => {
+    const dr = flipped ? 9 - row : row;
+    const dc = flipped ? 8 - col : col;
     return {
-      x: BOARD_PADDING + col * CELL_SIZE,
-      y: BOARD_PADDING + row * CELL_SIZE,
+      x: BOARD_PADDING + dc * CELL_SIZE,
+      y: BOARD_PADDING + dr * CELL_SIZE,
     };
-  }, []);
+  }, [flipped]);
 
   const pixelToBoard = useCallback((px: number, py: number): Position | null => {
-    const col = Math.round((px - BOARD_PADDING) / CELL_SIZE);
-    const row = Math.round((py - BOARD_PADDING) / CELL_SIZE);
-    if (col >= 0 && col <= 8 && row >= 0 && row <= 9) {
+    const dc = Math.round((px - BOARD_PADDING) / CELL_SIZE);
+    const dr = Math.round((py - BOARD_PADDING) / CELL_SIZE);
+    if (dc >= 0 && dc <= 8 && dr >= 0 && dr <= 9) {
+      const row = flipped ? 9 - dr : dr;
+      const col = flipped ? 8 - dc : dc;
       const { x, y } = boardToPixel(row, col);
       const dist = Math.sqrt((px - x) ** 2 + (py - y) ** 2);
       if (dist <= PIECE_RADIUS + 5) {
@@ -71,7 +78,7 @@ export default function Board() {
       }
     }
     return null;
-  }, [boardToPixel]);
+  }, [boardToPixel, flipped]);
 
   // 绘制棋盘
   useEffect(() => {
@@ -87,8 +94,8 @@ export default function Board() {
     canvas.style.height = `${BOARD_HEIGHT}px`;
     ctx.scale(dpr, dpr);
 
-    drawBoard(ctx, board, selectedPos, legalMoves, aiThinking);
-  }, [board, selectedPos, legalMoves, aiThinking]);
+    drawBoard(ctx, board, selectedPos, legalMoves, aiThinking, flipped);
+  }, [board, selectedPos, legalMoves, aiThinking, flipped]);
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -127,6 +134,7 @@ function drawBoard(
   selectedPos: Position | null,
   legalMoves: Position[],
   aiThinking: boolean,
+  flipped: boolean,
 ) {
   // 背景
   ctx.fillStyle = '#f5deb3';
@@ -186,14 +194,14 @@ function drawBoard(
   ctx.fillText('汉  界', BOARD_PADDING + 6 * CELL_SIZE, BOARD_PADDING + 4.5 * CELL_SIZE);
 
   // 最近两步的底色高亮（画在棋子下方）
-  drawLastMoveTints(ctx, board);
+  drawLastMoveTints(ctx, board, flipped);
 
   // 绘制棋子
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {
       const piece = board.grid[r][c];
       if (!piece) continue;
-      const { x, y } = { x: BOARD_PADDING + c * CELL_SIZE, y: BOARD_PADDING + r * CELL_SIZE };
+      const { x, y } = piecePixel(r, c, flipped);
       const isSelected = selectedPos?.row === r && selectedPos?.col === c;
       drawPiece(ctx, x, y, piece, isSelected);
     }
@@ -201,7 +209,7 @@ function drawBoard(
 
   // 合法着法提示
   for (const move of legalMoves) {
-    const { x, y } = { x: BOARD_PADDING + move.col * CELL_SIZE, y: BOARD_PADDING + move.row * CELL_SIZE };
+    const { x, y } = piecePixel(move.row, move.col, flipped);
     const targetPiece = board.grid[move.row][move.col];
 
     if (targetPiece) {
@@ -223,7 +231,7 @@ function drawBoard(
   }
 
   // 最近两步的高亮圈 + 移动箭头（画在棋子上方）
-  drawLastMoveMarkers(ctx, board);
+  drawLastMoveMarkers(ctx, board, flipped);
 
   // AI 思考中提示
   if (aiThinking) {
@@ -254,27 +262,32 @@ function drawPalaceCross(ctx: CanvasRenderingContext2D, startRow: number, startC
 }
 
 // 单元格左上角像素坐标
-function cellTopLeft(row: number, col: number): { x: number; y: number } {
-  return {
-    x: BOARD_PADDING + col * CELL_SIZE - CELL_SIZE / 2,
-    y: BOARD_PADDING + row * CELL_SIZE - CELL_SIZE / 2,
-  };
+function cellTopLeft(row: number, col: number, flipped: boolean): { x: number; y: number } {
+  const { x, y } = piecePixel(row, col, flipped);
+  return { x: x - CELL_SIZE / 2, y: y - CELL_SIZE / 2 };
 }
 
 // 棋格中心像素坐标（模块级，供绘制函数复用）
-function toPixel(row: number, col: number): { x: number; y: number } {
-  return { x: BOARD_PADDING + col * CELL_SIZE, y: BOARD_PADDING + row * CELL_SIZE };
+function toPixel(row: number, col: number, flipped: boolean): { x: number; y: number } {
+  return piecePixel(row, col, flipped);
+}
+
+// 逻辑坐标 → 像素中心坐标（考虑棋盘翻转）
+function piecePixel(row: number, col: number, flipped: boolean): { x: number; y: number } {
+  const dr = flipped ? 9 - row : row;
+  const dc = flipped ? 8 - col : col;
+  return { x: BOARD_PADDING + dc * CELL_SIZE, y: BOARD_PADDING + dr * CELL_SIZE };
 }
 
 // 对方上一步/上上步的单元格底色（画在棋子下方）
-function drawLastMoveTints(ctx: CanvasRenderingContext2D, board: BoardState) {
+function drawLastMoveTints(ctx: CanvasRenderingContext2D, board: BoardState, flipped: boolean) {
   const h = board.moveHistory;
   if (!h || h.length === 0) return;
   const last = h[h.length - 1];
   const prev = h.length >= 2 ? h[h.length - 2] : null;
 
   const tint = (pos: { row: number; col: number }, color: string) => {
-    const { x, y } = cellTopLeft(pos.row, pos.col);
+    const { x, y } = cellTopLeft(pos.row, pos.col, flipped);
     ctx.fillStyle = color;
     ctx.fillRect(x + 2, y + 2, CELL_SIZE - 4, CELL_SIZE - 4);
   };
@@ -289,15 +302,15 @@ function drawLastMoveTints(ctx: CanvasRenderingContext2D, board: BoardState) {
 }
 
 // 在棋子上方画高亮圈 + 移动箭头（区分强弱）
-function drawLastMoveMarkers(ctx: CanvasRenderingContext2D, board: BoardState) {
+function drawLastMoveMarkers(ctx: CanvasRenderingContext2D, board: BoardState, flipped: boolean) {
   const h = board.moveHistory;
   if (!h || h.length === 0) return;
   const last = h[h.length - 1];
   const prev = h.length >= 2 ? h[h.length - 2] : null;
 
   const marker = (from: Position, to: Position, color: string, strong: boolean) => {
-    const a = toPixel(from.row, from.col);
-    const b = toPixel(to.row, to.col);
+    const a = toPixel(from.row, from.col, flipped);
+    const b = toPixel(to.row, to.col, flipped);
     ctx.strokeStyle = color;
     ctx.lineWidth = strong ? 4 : 2.5;
     for (const c of [a, b]) {

@@ -4,10 +4,10 @@
 
 import { Color, PieceType, type Position, type Piece } from '../engine/types';
 import { cloneGridFast, samePos } from '../engine/utils';
-import { opponentColor, getEffectiveType, findKing } from '../engine/board';
+import { opponentColor, findKing } from '../engine/board';
 import { getAllLegalMoves, isInCheck, computeChases, type BoardState } from '../engine/moves';
 import { positionKey, REPETITION_LIMIT, judgeCycle, type MoveKind } from '../engine/repetition';
-import { evaluateBoard, getPieceValueSimple, PIECE_VALUES } from './evaluate';
+import { evaluateBoard, getPieceValueSimple, HIDDEN_PIECE_VALUE } from './evaluate';
 import { TranspositionTable, TTFlag } from './tt';
 import { computeHash } from './zobrist';
 
@@ -168,10 +168,10 @@ function quiescence(
     const aa = grid[a.from.row][a.from.col];
     const ab = grid[b.from.row][b.from.col];
     const ava = aa?.hidden
-      ? (PIECE_VALUES[getEffectiveType(aa, a.from) ?? PieceType.Pawn] ?? 100) * 0.75
+      ? HIDDEN_PIECE_VALUE
       : getPieceValueSimple(aa?.type ?? PieceType.Pawn);
     const avb = ab?.hidden
-      ? (PIECE_VALUES[getEffectiveType(ab, b.from) ?? PieceType.Pawn] ?? 100) * 0.75
+      ? HIDDEN_PIECE_VALUE
       : getPieceValueSimple(ab?.type ?? PieceType.Pawn);
     return ava - avb;
   });
@@ -224,7 +224,7 @@ function orderMoves(
         // MVV-LVA 吃子排序
         const victimVal = getPieceValueSimple(victim.type);
         const attackerVal = attacker?.hidden
-          ? (PIECE_VALUES[getEffectiveType(attacker, m.from) ?? PieceType.Pawn] ?? 100) * 0.75
+          ? HIDDEN_PIECE_VALUE
           : getPieceValueSimple(attacker?.type ?? PieceType.Pawn);
         score = 900_000 + victimVal * 100 - attackerVal;
       } else {

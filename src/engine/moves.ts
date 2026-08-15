@@ -8,7 +8,7 @@ import {
 } from './types';
 import {
   inBoard, getEffectiveType, opponentColor, findKing,
-  cloneGrid, cloneBoardState, getPositionIdentity,
+  cloneGrid, cloneBoardState,
 } from './board';
 import { generateNotation } from './notation';
 import {
@@ -27,9 +27,7 @@ export function getLegalMoves(state: BoardState, pos: Position): Position[] {
   if (!piece) return [];
   if (piece.color !== state.currentTurn) return [];
 
-  const effectiveType = piece.hidden
-    ? getPositionIdentity(pos) ?? piece.type
-    : piece.type;
+    const effectiveType = getEffectiveType(piece, pos);
 
   const candidates = getRawMoves(piece, effectiveType, pos, state.grid);
   // 过滤掉走后会导致己方被将的着法

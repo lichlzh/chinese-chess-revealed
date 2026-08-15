@@ -18,6 +18,13 @@ const PIECE_VALUE: Record<PieceType, number> = {
   [PieceType.Pawn]: 100,
 };
 
+/**
+ * 暗子未翻开时的统一期望值（随机洗牌派）。
+ * 取暗子池（车2/马2/炮2/象2/士2/兵5）子力价值的平均值 ≈ 320，
+ * 不区分真实类型，避免 AI 偷看暗子身份。
+ */
+export const HIDDEN_PIECE_VALUE = 320;
+
 // 兵/卒过河加成
 const PAWN_CROSSED = 100;
 
@@ -111,7 +118,7 @@ export function evaluateBoard(grid: (Piece | null)[][]): number {
       if (!p) continue;
 
       const val = p.hidden
-        ? PIECE_VALUE[p.type] * 0.75 + 15  // 暗子折价
+        ? HIDDEN_PIECE_VALUE  // 暗子未翻开:统一期望值,不偷看随机真实类型
         : pieceEval(p.type, r, c, p.color);
 
       material += (p.color === Color.Red ? val : -val);

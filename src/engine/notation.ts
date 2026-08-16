@@ -5,6 +5,7 @@
 // ============================================================
 
 import { Color, PieceType, type Piece, type Position } from './types';
+import { getPositionIdentity } from './board';
 
 /** 记谱用棋子名（红/黑区分） */
 const NOTATION_NAMES: Record<Color, Record<PieceType, string>> = {
@@ -62,12 +63,20 @@ export function generateNotation(
   piece: Piece,
 ): string {
   const color = piece.color;
-  const name = NOTATION_NAMES[color][piece.type];
+  // 暗子（未翻开）按「位置身份」记谱：既与走法一致，又不泄露真实兵种；
+  // 翻开后才用真实类型。揭棋标准记法：暗子走子时显示的是位置身份。
+  const nominalType = piece.hidden
+    ? (getPositionIdentity(from) ?? piece.type)
+    : piece.type;
+  const name = NOTATION_NAMES[color][nominalType];
 
   // 同列同色同型棋子（用于前/后区分）
-  const sameFile = collectSameFile(prevGrid, from.col, color, piece.type);
+  const sameFile = collectSameFile(prevGrid, from.col, color, nominalType);
   let label: string;
-  if (sameFile.length === 1) {
+  if (piece.hidden) {
+    // 暗子按位置身份记谱：同一列同一位置身份至多一枚，直接用路数
+    label = String(fileNumber(from.col, color));
+  } else if (sameFile.length === 1) {
     label = String(fileNumber(from.col, color));
   } else {
     const idx = sameFile.findIndex(p => p.row === from.row);
@@ -91,7 +100,7 @@ export function generateNotation(
   let fourth: string;
   if (direction === '平') {
     fourth = String(fileNumber(to.col, color));
-  } else if (isStraightMover(piece.type)) {
+  } else if (isStraightMover(nominalType)) {
     fourth = String(Math.abs(to.row - from.row)); // 步数
   } else {
     fourth = String(fileNumber(to.col, color));     // 斜线子：目标路数

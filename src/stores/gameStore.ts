@@ -4,10 +4,12 @@
 
 import { create } from 'zustand';
 import { Color, GameStatus, GameMode, type Position, type Piece } from '../engine/types';
-import { initBoard, opponentColor, cloneBoardState } from '../engine/board';
+import { initBoard } from '../engine/board';
 import { buildGameRecord } from '../engine/record';
-import { getLegalMoves, executeMove, getAllLegalMoves } from '../engine/moves';
+import { getLegalMoves, executeMove, undoMove } from '../engine/moves';
 import { samePos } from '../engine/utils';
+import { findSimpleMove } from '../ai/search';
+import { createAIManager, type AIManager } from '../ai/manager';
 import type { BoardState } from '../engine/moves';
 
 interface GameStore {
@@ -19,8 +21,8 @@ interface GameStore {
   legalMoves: Position[];
   aiThinking: boolean;
 
-  // AI Worker（持久化复用）
-  aiWorker: Worker | null;
+  // AI Manager（持久化复用）
+  aiManager: AIManager | null;
   aiRequestId: number;
 
   // Actions
@@ -44,23 +46,20 @@ export const useGameStore = create<GameStore>((set, get) => ({
   selectedPos: null,
   legalMoves: [],
   aiThinking: false,
-  aiWorker: null,
+  aiManager: null,
   aiRequestId: 0,
 
   newGame: (mode: GameMode, playerColor: Color = Color.Red) => {
     const board = initBoard();
 
-    // 清理旧 Worker
-    const { aiWorker } = get();
-    if (aiWorker) {
-      aiWorker.terminate();
+    // 清理旧 Manager
+    const { aiManager } = get();
+    if (aiManager) {
+      aiManager.terminate();
     }
 
-    // 创建持久化 Worker（人机模式）
-    let newWorker: Worker | null = null;
-    if (mode === GameMode.PvAI) {
-      newWorker = createWorker();
-    }
+    // 创建持久化 Manager（人机模式）
+    const newManager = mode === GameMode.PvAI ? createAIManager() : null;
 
     set({
       board,
@@ -69,7 +68,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       selectedPos: null,
       legalMoves: [],
       aiThinking: false,
-      aiWorker: newWorker,
+      aiManager: newManager,
       aiRequestId: 0,
     });
 
@@ -124,44 +123,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
   undo: () => {
     const { board, gameMode, aiThinking } = get();
     if (aiThinking) return;
-    const history = board.moveHistory;
-    if (history.length === 0) return;
+    if (board.moveHistory.length === 0) return;
 
-    const steps = gameMode === GameMode.PvAI && history.length >= 2 ? 2 : 1;
-    let newBoard = cloneBoardState(board);
-
-    for (let i = 0; i < steps; i++) {
-      const lastMove = newBoard.moveHistory[newBoard.moveHistory.length - 1];
-      if (!lastMove) break;
-
-      newBoard.moveHistory = newBoard.moveHistory.slice(0, -1);
-
-      const movedPiece = lastMove.piece;
-      newBoard.grid[lastMove.from.row][lastMove.from.col] = movedPiece;
-
-      if (lastMove.captured) {
-        newBoard.grid[lastMove.to.row][lastMove.to.col] = lastMove.captured;
-        if (lastMove.captured.color === Color.Red) {
-          newBoard.redCaptured = newBoard.redCaptured.filter(p => p.id !== lastMove.captured!.id);
-        } else {
-          newBoard.blackCaptured = newBoard.blackCaptured.filter(p => p.id !== lastMove.captured!.id);
-        }
-      } else {
-        newBoard.grid[lastMove.to.row][lastMove.to.col] = null;
-      }
-
-      newBoard.currentTurn = opponentColor(newBoard.currentTurn);
-    }
-
-    // 还原棋规计数（重复局面靠 moveHistory 现算，无需还原）
-    let noCapture = 0;
-    for (let i = newBoard.moveHistory.length - 1; i >= 0; i--) {
-      if (newBoard.moveHistory[i].captured) break;
-      noCapture++;
-    }
-    newBoard.movesWithoutCapture = noCapture;
-    newBoard.endReason = undefined;
-    newBoard.status = GameStatus.Playing;
+    const steps = gameMode === GameMode.PvAI && board.moveHistory.length >= 2 ? 2 : 1;
+    const newBoard = undoMove(board, steps);
     set({ board: newBoard, selectedPos: null, legalMoves: [] });
   },
 
@@ -169,63 +134,43 @@ export const useGameStore = create<GameStore>((set, get) => ({
     set({ gameMode: mode });
   },
 
-  requestAIMove: () => {
-    const { board, aiThinking, aiWorker } = get();
+  requestAIMove: async () => {
+    const { board, aiThinking, aiManager } = get();
     if (aiThinking || board.status !== GameStatus.Playing) return;
 
-    // 尝试使用持久化 Worker
-    if (aiWorker) {
+    if (aiManager) {
       set({ aiThinking: true });
       const id = get().aiRequestId + 1;
       set({ aiRequestId: id });
 
-      let resolved = false;
-      const onMessage = (e: MessageEvent) => {
-        if (resolved) return;
-        if (e.data.type === 'result' && e.data.id === id) {
-          resolved = true;
-          aiWorker.removeEventListener('message', onMessage);
+      const result = await aiManager.requestMove(
+        board,
+        { maxDepth: 6, timeLimit: 3000 },
+        5000,
+      );
 
-          const { result: aiResult } = e.data;
-          if (aiResult) {
-            const store = get();
-            const moveResult = executeMove(store.board, aiResult.from, aiResult.to);
-            if (moveResult) {
-              set({ board: moveResult.newState, aiThinking: false });
-            } else {
-              set({ aiThinking: false });
-            }
-          } else {
-            set({ aiThinking: false });
-          }
+      // 检查请求是否仍然有效（期间可能已 newGame / undo）
+      if (get().aiRequestId !== id) return;
+
+      if (result) {
+        const store = get();
+        const moveResult = executeMove(store.board, result.from, result.to);
+        if (moveResult) {
+          set({ board: moveResult.newState, aiThinking: false });
+          return;
         }
-      };
+      }
 
-      aiWorker.addEventListener('message', onMessage);
-
-      aiWorker.postMessage({
-        type: 'search',
-        id,
-        state: board,
-        config: { maxDepth: 6, timeLimit: 3000 },
-      });
-
-      // 超时保护
-      setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          aiWorker.removeEventListener('message', onMessage);
-          set({ aiThinking: false });
-          get().fallbackAIMove();
-        }
-      }, 5000);
+      // Worker 超时或返回 null → fallback
+      set({ aiThinking: false });
+      get().fallbackAIMove();
     } else {
-      // 没有 Worker（PvP 模式回调）→ 回退 AI
+      // 没有 Manager（PvP 模式）→ fallback
       get().fallbackAIMove();
     }
   },
 
-  // 回退 AI（简单 Minimax，无 Worker 时使用）
+  // Fallback AI：使用轻量搜索（无需 Worker），远优于随机走法
   fallbackAIMove: () => {
     const { board } = get();
     if (board.status !== GameStatus.Playing) return;
@@ -233,18 +178,15 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
     setTimeout(() => {
       const state = get();
-      const allMoves = getAllLegalMoves(state.board);
-      if (allMoves.length > 0) {
-        const pick = allMoves[Math.floor(Math.random() * allMoves.length)];
-        const result = executeMove(state.board, pick.from, pick.to);
+      const move = findSimpleMove(state.board, 3);
+      if (move) {
+        const result = executeMove(state.board, move.from, move.to);
         if (result) {
           set({ board: result.newState, aiThinking: false });
-        } else {
-          set({ aiThinking: false });
+          return;
         }
-      } else {
-        set({ aiThinking: false });
       }
+      set({ aiThinking: false });
     }, 500);
   },
 
@@ -257,10 +199,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
   },
 
   cleanup: () => {
-    const { aiWorker } = get();
-    if (aiWorker) {
-      aiWorker.terminate();
-      set({ aiWorker: null });
+    const { aiManager } = get();
+    if (aiManager) {
+      aiManager.terminate();
+      set({ aiManager: null });
     }
   },
 
@@ -274,11 +216,3 @@ export const useGameStore = create<GameStore>((set, get) => ({
     });
   },
 }));
-
-/** 创建持久化 AI Worker */
-function createWorker(): Worker {
-  return new Worker(
-    new URL('../ai/worker.ts', import.meta.url),
-    { type: 'module' },
-  );
-}

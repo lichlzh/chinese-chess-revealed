@@ -526,7 +526,8 @@ export function executeMove(state: BoardState, from: Position, to: Position): { 
 
   if (isCheckmate(newState)) {
     moveRecord.isCheckmate = opponentInCheck;
-    newState.status = state.currentTurn === Color.Red ? GameStatus.BlackWin : GameStatus.RedWin;
+    // state.currentTurn 是「刚走子将死对方」的一方，即胜者
+    newState.status = state.currentTurn === Color.Red ? GameStatus.RedWin : GameStatus.BlackWin;
     newState.endReason = opponentInCheck ? '将死' : '困毙';
   }
 
@@ -557,6 +558,53 @@ export function executeMove(state: BoardState, from: Position, to: Position): { 
   }
 
   return { newState, move: moveRecord };
+}
+
+/**
+ * 悔棋：撤销最近的一步（或两步，取决于 mode），返回新的 BoardState。
+ * - steps=1：撤销一步（PvP 模式）
+ * - steps=2：撤销两步（PvAI 模式，撤销 AI 的着法 + 玩家的着法）
+ * 如果历史记录不足 steps 步，则撤销所有可用步数。
+ */
+export function undoMove(state: BoardState, steps: number): BoardState {
+  const newBoard = cloneBoardState(state);
+
+  for (let i = 0; i < steps; i++) {
+    const lastMove = newBoard.moveHistory[newBoard.moveHistory.length - 1];
+    if (!lastMove) break;
+
+    newBoard.moveHistory = newBoard.moveHistory.slice(0, -1);
+
+    // 恢复到起始位置（piece 保存的是走子前的状态，含 hidden）
+    const movedPiece = lastMove.piece;
+    newBoard.grid[lastMove.from.row][lastMove.from.col] = movedPiece;
+
+    // 恢复被吃子 / 清空目标格
+    if (lastMove.captured) {
+      newBoard.grid[lastMove.to.row][lastMove.to.col] = lastMove.captured;
+      if (lastMove.captured.color === Color.Red) {
+        newBoard.redCaptured = newBoard.redCaptured.filter(p => p.id !== lastMove.captured!.id);
+      } else {
+        newBoard.blackCaptured = newBoard.blackCaptured.filter(p => p.id !== lastMove.captured!.id);
+      }
+    } else {
+      newBoard.grid[lastMove.to.row][lastMove.to.col] = null;
+    }
+
+    newBoard.currentTurn = opponentColor(newBoard.currentTurn);
+  }
+
+  // 重建连续无吃子计数
+  let noCapture = 0;
+  for (let i = newBoard.moveHistory.length - 1; i >= 0; i--) {
+    if (newBoard.moveHistory[i].captured) break;
+    noCapture++;
+  }
+  newBoard.movesWithoutCapture = noCapture;
+  newBoard.endReason = undefined;
+  newBoard.status = GameStatus.Playing;
+
+  return newBoard;
 }
 
 /**

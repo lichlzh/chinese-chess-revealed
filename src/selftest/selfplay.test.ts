@@ -3,20 +3,16 @@
 // 跑 100 局、导出每局棋谱，并对每一步做合法性 / 终局不变量检查。
 // 运行：npm test -- src/selftest/selfplay.test.ts
 // ============================================================
-// @ts-nocheck
-
 
 import { describe, test, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { initBoard, resetIdCounter, opponentColor } from '../engine/board';
-import { getAllLegalMoves, executeMove, isInCheck } from '../engine/moves';
+import { getAllLegalMoves, executeMove, isInCheck, type BoardState } from '../engine/moves';
 import { findBestMove } from '../ai/search';
 import { TranspositionTable } from '../ai/tt';
 import { buildGameRecord } from '../engine/record';
-import {
-  Color, GameStatus, GameMode, samePos,
-} from '../engine/types';
+import { Color, GameStatus, GameMode, samePos, type Piece } from '../engine/types';
 
 const NUM_GAMES = 100;
 const MAX_PLIES = 400;
@@ -34,7 +30,11 @@ interface GameResult {
   usedSafetyCap: boolean;
 }
 
-function countKings(grid: (null | { type: string; color: Color; hidden: boolean })[][], color: Color): number {
+function emptyGrid(): (Piece | null)[][] {
+  return Array.from({ length: 10 }, () => Array.from({ length: 9 }, () => null));
+}
+
+function countKings(grid: (Piece | null)[][], color: Color): number {
   let n = 0;
   for (let r = 0; r < 10; r++) {
     for (let c = 0; c < 9; c++) {

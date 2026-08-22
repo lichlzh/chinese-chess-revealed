@@ -3,8 +3,8 @@
 // ============================================================
 
 import { Color, PieceType, type Position, type Piece } from '../engine/types';
-import { cloneGridFast, samePos } from '../engine/utils';
-import { opponentColor, findKing } from '../engine/board';
+import { cloneGridFast } from '../engine/utils';
+import { opponentColor } from '../engine/board';
 import { getAllLegalMoves, isInCheck, computeChases, type BoardState } from '../engine/moves';
 import { positionKey, REPETITION_LIMIT, judgeCycle, type MoveKind } from '../engine/repetition';
 import { evaluateBoard, getPieceValueSimple, HIDDEN_PIECE_VALUE } from './evaluate';
@@ -18,19 +18,32 @@ const DRAW_SCORE = 0;
 const NULL_MOVE_R = 2;       // 空着裁剪缩减深度
 const MIN_NULL_DEPTH = 2;    // 最小空着深度
 const RAZOR_MARGIN = 300;    // 剃刀剪枝边距
+const MAX_HISTORY = 1 << 16; // 历史启发表容量上限
 
-// ---- 全局搜索状态（模块级单例） ----
-let tt: TranspositionTable;
-let nodesSearched = 0;
-let searchStartTime = 0;
-let timeLimit = 0;
+// ---- 搜索上下文（替代模块级单例） ----
+export interface SearchContext {
+  tt: TranspositionTable;
+  nodesSearched: number;
+  searchStartTime: number;
+  timeLimit: number;
+  killerMoves: [number, number][];
+  historyTable: Map<number, number>;
+}
 
-// 杀手着法：killerMoves[ply] = [slot0, slot1]
-const killerMoves: [number, number][] = Array.from({ length: 64 }, () => [0, 0]);
-
-// 历史启发表
-const historyTable = new Map<number, number>();
-const MAX_HISTORY = 1 << 16;
+/** 创建搜索上下文 */
+export function createSearchContext(
+  tt: TranspositionTable,
+  timeLimit: number,
+): SearchContext {
+  return {
+    tt,
+    nodesSearched: 0,
+    searchStartTime: Date.now(),
+    timeLimit,
+    killerMoves: Array.from({ length: 64 }, () => [0, 0]),
+    historyTable: new Map(),
+  };
+}
 
 // ---- 着法编解码（10*9 棋盘，10 以内数字可单字节编码） ----
 function encode(from: Position, to: Position): number {
@@ -127,14 +140,15 @@ export function repetitionScore(
 
 // ---- 静态搜索（Quiescence Search） ----
 function quiescence(
+  ctx: SearchContext,
   grid: (Piece | null)[][],
   turn: Color,
   alpha: number,
   beta: number,
 ): number {
-  nodesSearched++;
+  ctx.nodesSearched++;
 
-  if (timeLimit > 0 && (nodesSearched & 127) === 0 && Date.now() - searchStartTime > timeLimit) {
+  if (ctx.timeLimit > 0 && (ctx.nodesSearched & 127) === 0 && Date.now() - ctx.searchStartTime > ctx.timeLimit) {
     return 0;
   }
 
@@ -184,7 +198,7 @@ function quiescence(
     // 跳过送将的着法
     if (isInCheck(result.grid, turn)) continue;
 
-    const score = -quiescence(result.grid, opponentColor(turn), -beta, -alpha);
+    const score = -quiescence(ctx, result.grid, opponentColor(turn), -beta, -alpha);
 
     if (score >= beta) return beta;
     if (score > alpha) alpha = score;
@@ -202,6 +216,7 @@ interface ScoredMove {
 }
 
 function orderMoves(
+  ctx: SearchContext,
   grid: (Piece | null)[][],
   turn: Color,
   moves: { from: Position; to: Position }[],
@@ -229,10 +244,10 @@ function orderMoves(
         score = 900_000 + victimVal * 100 - attackerVal;
       } else {
         // 杀手着法
-        if (killerMoves[ply][0] === enc) score = 800_000;
-        else if (killerMoves[ply][1] === enc) score = 799_999;
+        if (ctx.killerMoves[ply][0] === enc) score = 800_000;
+        else if (ctx.killerMoves[ply][1] === enc) score = 799_999;
         // 历史启发
-        else score = historyTable.get(enc) ?? 0;
+        else score = ctx.historyTable.get(enc) ?? 0;
         // 暗子翻开加成
         if (attacker?.hidden) score += 500;
       }
@@ -245,8 +260,34 @@ function orderMoves(
   return result;
 }
 
+// ---- 杀手/历史启发更新 ----
+function updateKiller(ctx: SearchContext, encoded: number, ply: number) {
+  if (ctx.killerMoves[ply][0] !== encoded) {
+    ctx.killerMoves[ply][1] = ctx.killerMoves[ply][0];
+    ctx.killerMoves[ply][0] = encoded;
+  }
+}
+
+function updateHistory(ctx: SearchContext, encoded: number, depth: number) {
+  const bonus = Math.min(depth * depth, 400);
+  const old = ctx.historyTable.get(encoded) ?? 0;
+  const newVal = old + bonus - (old * bonus) / 1024; // 衰减式更新
+  ctx.historyTable.set(encoded, newVal);
+
+  if (ctx.historyTable.size > MAX_HISTORY) {
+    // 清理过大的历史表
+    const half = ctx.historyTable.size >> 1;
+    let count = 0;
+    for (const key of ctx.historyTable.keys()) {
+      ctx.historyTable.delete(key);
+      if (++count >= half) break;
+    }
+  }
+}
+
 // ---- 主搜索（Negamax + PVS） ----
 function search(
+  ctx: SearchContext,
   grid: (Piece | null)[][],
   turn: Color,
   depth: number,
@@ -257,10 +298,10 @@ function search(
   path: PathEntry[] = [],
   repetitionAware: boolean = true,
 ): number {
-  nodesSearched++;
+  ctx.nodesSearched++;
 
   // 超时检测（每 64 个节点检测一次）
-  if (timeLimit > 0 && (nodesSearched & 63) === 0 && Date.now() - searchStartTime > timeLimit) {
+  if (ctx.timeLimit > 0 && (ctx.nodesSearched & 63) === 0 && Date.now() - ctx.searchStartTime > ctx.timeLimit) {
     return 0;
   }
 
@@ -275,7 +316,7 @@ function search(
 
   // ===== 置换表探测 =====
   const hash = computeHash(grid, turn);
-  const ttEntry = tt.probe(hash);
+  const ttEntry = ctx.tt.probe(hash);
   let ttMove = 0;
 
   if (ttEntry && ttEntry.depth >= depth) {
@@ -287,7 +328,7 @@ function search(
 
   // ===== 叶节点 → 静态搜索 =====
   if (depth <= 0) {
-    return quiescence(grid, turn, alpha, beta);
+    return quiescence(ctx, grid, turn, alpha, beta);
   }
 
   // ===== 生成合法着法 =====
@@ -321,13 +362,13 @@ function search(
         if (grid[r][c]) pc++;
     if (pc > 10) {
       const R = NULL_MOVE_R + (depth > 6 ? 1 : 0);
-      const nullScore = -search(grid, opponentColor(turn), depth - 1 - R, -beta, -beta + 1, ply + 1, false);
+      const nullScore = -search(ctx, grid, opponentColor(turn), depth - 1 - R, -beta, -beta + 1, ply + 1, false);
       if (nullScore >= beta) return beta;
     }
   }
 
   // ===== 着法排序 =====
-  const scored = orderMoves(grid, turn, allMoves, ttMove, ply);
+  const scored = orderMoves(ctx, grid, turn, allMoves, ttMove, ply);
 
   // ===== PVS 主搜索循环 =====
   let bestScore = -INF;
@@ -350,14 +391,14 @@ function search(
     let score: number;
 
     if (first) {
-      score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, isPV, path, repetitionAware);
+      score = -search(ctx, result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, isPV, path, repetitionAware);
       first = false;
     } else {
       // 零窗口搜索
-      score = -search(result.grid, newTurn, depth - 1, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware);
+      score = -search(ctx, result.grid, newTurn, depth - 1, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware);
       // 窗口失效 → 重新完整搜索
       if (score > alpha && score < beta) {
-        score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, true, path, repetitionAware);
+        score = -search(ctx, result.grid, newTurn, depth - 1, -beta, -alpha, ply + 1, true, path, repetitionAware);
       }
     }
 
@@ -376,48 +417,23 @@ function search(
           flag = TTFlag.BETA;
           // 非吃子着法 → 更新杀手
           if (!grid[move.to.row][move.to.col]) {
-            updateKiller(move.encoded, ply);
+            updateKiller(ctx, move.encoded, ply);
           }
-          updateHistory(move.encoded, depth);
+          updateHistory(ctx, move.encoded, depth);
           break;
         }
       }
     }
 
-    if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
+    if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > ctx.timeLimit) break;
   }
 
   // ===== 写入置换表 =====
-  if (bestScore > -INF && (timeLimit === 0 || Date.now() - searchStartTime <= timeLimit)) {
-    tt.store(hash, depth, bestScore, flag, bestMove);
+  if (bestScore > -INF && (ctx.timeLimit === 0 || Date.now() - ctx.searchStartTime <= ctx.timeLimit)) {
+    ctx.tt.store(hash, depth, bestScore, flag, bestMove);
   }
 
   return bestScore;
-}
-
-// ---- 杀手/历史启发更新 ----
-function updateKiller(encoded: number, ply: number) {
-  if (killerMoves[ply][0] !== encoded) {
-    killerMoves[ply][1] = killerMoves[ply][0];
-    killerMoves[ply][0] = encoded;
-  }
-}
-
-function updateHistory(encoded: number, depth: number) {
-  const bonus = Math.min(depth * depth, 400);
-  const old = historyTable.get(encoded) ?? 0;
-  const newVal = old + bonus - (old * bonus) / 1024; // 衰减式更新
-  historyTable.set(encoded, newVal);
-
-  if (historyTable.size > MAX_HISTORY) {
-    // 清理过大的历史表
-    const half = historyTable.size >> 1;
-    let count = 0;
-    for (const key of historyTable.keys()) {
-      historyTable.delete(key);
-      if (++count >= half) break;
-    }
-  }
 }
 
 // ========================================================================
@@ -434,14 +450,7 @@ export function findBestMove(
   config: SearchConfig,
   transpositionTable: TranspositionTable,
 ): { from: Position; to: Position } | null {
-  tt = transpositionTable;
-  searchStartTime = Date.now();
-  timeLimit = config.timeLimit;
-  nodesSearched = 0;
-
-  // 重置杀手与历史
-  for (let i = 0; i < 64; i++) killerMoves[i] = [0, 0];
-  historyTable.clear();
+  const ctx = createSearchContext(transpositionTable, config.timeLimit);
 
   const allMoves = getAllLegalMoves(state);
   if (allMoves.length === 0) return null;
@@ -465,27 +474,26 @@ export function findBestMove(
     let currentBest: { from: Position; to: Position; encoded: number } | null = null;
     let currentBestScore = -INF;
 
-    const scored = orderMoves(state.grid, state.currentTurn, allMoves, 0, 0);
+    const scored = orderMoves(ctx, state.grid, state.currentTurn, allMoves, 0, 0);
 
     for (const move of scored) {
       const result = applyMove(state.grid, move.from, move.to);
       const newTurn = opponentColor(state.currentTurn);
       const path: PathEntry[] = [];
 
-      let score = -search(result.grid, newTurn, depth - 1, -beta, -alpha, 0, true, path, true);
+      let score = -search(ctx, result.grid, newTurn, depth - 1, -beta, -alpha, 0, true, path, true);
 
       // 窗口失效 → 用全窗口重搜
       if (score <= alpha || score >= beta) {
-        score = -search(result.grid, newTurn, depth - 1, -INF, INF, 0, true, path, true);
+        score = -search(ctx, result.grid, newTurn, depth - 1, -INF, INF, 0, true, path, true);
       }
 
-      // 对当前着法估值进行美化：优先走有利于自己颜色的着法
       if (score > currentBestScore) {
         currentBestScore = score;
         currentBest = { from: move.from, to: move.to, encoded: move.encoded };
       }
 
-      if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
+      if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > ctx.timeLimit) break;
     }
 
     if (currentBest) {
@@ -494,14 +502,87 @@ export function findBestMove(
     }
 
     // 超时 → 用当前最优着法
-    if (timeLimit > 0 && Date.now() - searchStartTime > timeLimit) break;
+    if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > ctx.timeLimit) break;
 
     // 杀棋 → 无需更深搜索
     if (Math.abs(bestScore) > MATE_SCORE - 200) break;
   }
 
-  if (timeLimit > 0) {
-    console.debug(`[AI] depth=${config.maxDepth} nodes=${nodesSearched} time=${Date.now() - searchStartTime}ms ttSize=${tt.size} ttHit=${Math.round(tt.hitRate() * 100)}%`);
+  if (ctx.timeLimit > 0) {
+    console.debug(`[AI] depth=${config.maxDepth} nodes=${ctx.nodesSearched} time=${Date.now() - ctx.searchStartTime}ms ttSize=${ctx.tt.size} ttHit=${Math.round(ctx.tt.hitRate() * 100)}%`);
+  }
+
+  return bestMove;
+}
+
+// ========================================================================
+// 轻量级 AI（用于 fallback，无需 Worker）
+// ========================================================================
+
+/**
+ * 简单的 Negamax + Alpha-Beta 搜索（无置换表、无高级剪枝）。
+ * 用于 Worker 不可用时的 fallback，保证 AI 不会退化为随机走法。
+ */
+function simpleSearch(
+  grid: (Piece | null)[][],
+  turn: Color,
+  depth: number,
+  alpha: number,
+  beta: number,
+): number {
+  if (depth <= 0) {
+    return turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid);
+  }
+
+  const state = makeTempState(grid, turn);
+  const allMoves = getAllLegalMoves(state);
+
+  if (allMoves.length === 0) {
+    return isInCheck(grid, turn) ? -(MATE_SCORE - depth) : DRAW_SCORE;
+  }
+
+  let bestScore = -INF;
+
+  for (const mv of allMoves) {
+    const result = applyMove(grid, mv.from, mv.to);
+    // 跳过送将
+    if (isInCheck(result.grid, turn)) continue;
+
+    const score = -simpleSearch(result.grid, opponentColor(turn), depth - 1, -beta, -alpha);
+
+    if (score > bestScore) bestScore = score;
+    if (score > alpha) alpha = score;
+    if (alpha >= beta) break; // Beta 剪枝
+  }
+
+  return bestScore;
+}
+
+/**
+ * Fallback AI：轻量搜索，无需 Web Worker。
+ * 搜索深度较浅但远优于随机走法。
+ */
+export function findSimpleMove(
+  state: BoardState,
+  maxDepth: number = 3,
+): { from: Position; to: Position } | null {
+  const allMoves = getAllLegalMoves(state);
+  if (allMoves.length === 0) return null;
+  if (allMoves.length === 1) return allMoves[0];
+
+  let bestMove: { from: Position; to: Position } | null = null;
+  let bestScore = -INF;
+
+  for (const mv of allMoves) {
+    const result = applyMove(state.grid, mv.from, mv.to);
+    if (isInCheck(result.grid, state.currentTurn)) continue;
+
+    const score = -simpleSearch(result.grid, opponentColor(state.currentTurn), maxDepth - 1, -INF, INF);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMove = mv;
+    }
   }
 
   return bestMove;

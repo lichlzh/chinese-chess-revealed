@@ -414,15 +414,25 @@ function search(
 
     let score: number;
 
-    // Phase 3: LMR
+    // Phase 3: 动态 LMR（基于着法序号 + 历史分 + 杀手着法）
+    const isKiller = ctx.killerMoves[Math.min(ply, MAX_PLY - 1)][0] === move.encoded ||
+                     ctx.killerMoves[Math.min(ply, MAX_PLY - 1)][1] === move.encoded;
+    const histScore = ctx.historyTable.get(move.encoded) ?? 0;
+
     const canLMR = effectiveDepth >= LMR_MIN_DEPTH &&
                     i >= LMR_MIN_MOVE_IDX &&
                     !isChk &&
+                    !isKiller &&
                     !grid[undo.toRow][undo.toCol]?.hidden &&
                     !undo.capturedPiece;
 
     if (canLMR) {
-      const reduction = (i >= 8) ? 2 : 1;
+      // 动态缩减：基础 1，序号大 +1，历史分低 +1，暗子攻击方 +0.5
+      let reduction = 1;
+      if (i >= 8) reduction++;
+      if (histScore < 0) reduction++;           // 历史分低 → 多减
+      if (grid[move.from.row][move.from.col]?.hidden) reduction++; // 暗子 → 多减
+      reduction = Math.min(reduction, effectiveDepth - 2); // 不能减太多
       score = -search(ctx, grid, newTurn, effectiveDepth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
       if (score > alpha) {
         score = -search(ctx, grid, newTurn, effectiveDepth - 1, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);

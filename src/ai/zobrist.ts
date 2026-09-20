@@ -46,7 +46,7 @@ for (let t = 0; t < PIECE_TYPES; t++) {
     }
   }
 }
-const sideKey = rng();
+export const sideKey = rng();
 
 /** 从头计算局面的 Zobrist 哈希值 */
 export function computeHash(grid: (Piece | null)[][], currentTurn: Color): number {

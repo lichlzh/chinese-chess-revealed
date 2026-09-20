@@ -255,7 +255,140 @@ function getSlidingMoves(
   return result;
 }
 
+// ---- Make/Unmake（原地修改，避免全盘克隆）====
+
+/** Make 操作的撤销信息 */
+export interface UndoMove {
+  fromRow: number;
+  fromCol: number;
+  toRow: number;
+  toCol: number;
+  movedPiece: Piece;     // 移动前的完整棋子（含 hidden 状态）
+  capturedPiece: Piece | null;
+  wasHidden: boolean;
+}
+
+/** 原地执行一步棋（修改 grid），返回撤销信息 */
+export function makeMove(grid: (Piece | null)[][], from: Position, to: Position): UndoMove {
+  const piece = grid[from.row][from.col]!;
+  const captured = grid[to.row][to.col];
+  const wasHidden = piece.hidden;
+
+  const undo: UndoMove = {
+    fromRow: from.row,
+    fromCol: from.col,
+    toRow: to.row,
+    toCol: to.col,
+    movedPiece: { ...piece },
+    capturedPiece: captured ? { ...captured } : null,
+    wasHidden,
+  };
+
+  // 移动棋子（翻开暗子）
+  grid[to.row][to.col] = wasHidden ? { ...piece, hidden: false } : piece;
+  grid[from.row][from.col] = null;
+
+  return undo;
+}
+
+/** 根据撤销信息恢复局面 */
+export function unmakeMove(grid: (Piece | null)[][], undo: UndoMove): void {
+  grid[undo.fromRow][undo.fromCol] = undo.movedPiece;
+  grid[undo.toRow][undo.toCol] = undo.capturedPiece;
+}
+
 // ---- 将军检测 ----
+
+/**
+ * 基于将位射线检测的快速 isInCheck。
+ * 从将/帅位置出发，反向检查马、车、炮、兵、将的攻击。
+ * 复杂度 O(4×9 + 8) ≈ O(常数)，替代 O(90 × 走法生成)。
+ *
+ * @param kingPos 将/帅位置（由调用者缓存，避免每次 findKing 全扫描）
+ */
+export function isInCheckFast(grid: (Piece | null)[][], color: Color, kingPos: Position): boolean {
+  const { row: kr, col: kc } = kingPos;
+  const enemy = color === Color.Red ? Color.Black : Color.Red;
+
+  // 1. 飞将检测
+  for (let r = kr - 1; r >= 0; r--) {
+    const p = grid[r][kc];
+    if (p) {
+      if (p.color === enemy && p.type === PieceType.King && !p.hidden) return true;
+      break;
+    }
+  }
+  for (let r = kr + 1; r <= 9; r++) {
+    const p = grid[r][kc];
+    if (p) {
+      if (p.color === enemy && p.type === PieceType.King && !p.hidden) return true;
+      break;
+    }
+  }
+
+  // 2. 车/炮射线检测（4 个方向）
+  const dirs: [number, number][] = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+  for (const [dr, dc] of dirs) {
+    let r = kr + dr, c = kc + dc;
+    let firstPiece: Piece | null = null;
+
+    // 找到该方向第一个棋子
+    while (r >= 0 && r <= 9 && c >= 0 && c <= 8) {
+      const p = grid[r][c];
+      if (p) { firstPiece = p; break; }
+      r += dr;
+      c += dc;
+    }
+
+    if (firstPiece && firstPiece.color === enemy && !firstPiece.hidden) {
+      // 车紧邻 → 被将
+      if (firstPiece.type === PieceType.Chariot) return true;
+      // 炮隔一子 → 被将
+      if (firstPiece.type === PieceType.Cannon) {
+        r += dr;
+        c += dc;
+        while (r >= 0 && r <= 9 && c >= 0 && c <= 8) {
+          const p2 = grid[r][c];
+          if (p2) {
+            if (p2.color === enemy && !p2.hidden) return true;
+            break;
+          }
+          r += dr;
+          c += dc;
+        }
+      }
+    }
+  }
+
+  // 3. 马攻击检测（8 个马位 + 蹩马脚）
+  const horseAttacks: [number, number, number, number][] = [
+    [-2, -1, -1, 0], [-2, 1, -1, 0],
+    [2, -1, 1, 0], [2, 1, 1, 0],
+    [-1, -2, 0, -1], [-1, 2, 0, 1],
+    [1, -2, 0, -1], [1, 2, 0, 1],
+  ];
+  for (const [dr, dc, br, bc] of horseAttacks) {
+    const nr = kr + dr, nc = kc + dc;
+    if (nr < 0 || nr > 9 || nc < 0 || nc > 8) continue;
+    // 蹩马脚
+    if (grid[kr + br]?.[kc + bc]) continue;
+    const p = grid[nr][nc];
+    if (p && p.color === enemy && !p.hidden && p.type === PieceType.Horse) return true;
+  }
+
+  // 4. 兵/卒攻击检测
+  const fwd = color === Color.Red ? -1 : 1; // 敌方兵的前进方向
+  // 正前方一格有敌兵
+  const pf = grid[kr + fwd]?.[kc];
+  if (pf && pf.color === enemy && !pf.hidden && pf.type === PieceType.Pawn) return true;
+  // 左右一格有敌兵
+  for (const dc of [-1, 1]) {
+    const pp = grid[kr]?.[kc + dc];
+    if (pp && pp.color === enemy && !pp.hidden && pp.type === PieceType.Pawn) return true;
+  }
+
+  return false;
+}
 
 /**
  * 飞将（将帅照面）检测：红黑将/帅在同一列、且中间无任何棋子时为非法局面。
@@ -319,6 +452,61 @@ export function getAllLegalMoves(state: BoardState): { from: Position; to: Posit
     }
   }
   return result;
+}
+
+/** 快速找到双方将/帅位置（一次性扫描，缓存给搜索复用） */
+export function findAllKings(grid: (Piece | null)[][]): Record<Color, Position | null> {
+  const result: Record<Color, Position | null> = {
+    [Color.Red]: null,
+    [Color.Black]: null,
+  };
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = grid[r][c];
+      if (p && p.type === PieceType.King && !p.hidden) {
+        result[p.color] = { row: r, col: c };
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * 仅生成吃子着法（QS 专用，避免生成全部着法再过滤）。
+ * 使用 make/unmake 检测将军，比 cloneGrid 快约 10 倍。
+ */
+export function generateCaptures(
+  grid: (Piece | null)[][],
+  color: Color,
+  kingPos: Position,
+): { from: Position; to: Position }[] {
+  const captures: { from: Position; to: Position }[] = [];
+
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const piece = grid[r][c];
+      if (!piece || piece.color !== color) continue;
+
+      const from = { row: r, col: c };
+      const effType = getEffectiveType(piece, from);
+      const targets = getRawMoves(piece, effType, from, grid);
+
+      for (const to of targets) {
+        if (!grid[to.row][to.col]) continue; // 只吃子
+
+        const undo = makeMove(grid, from, to);
+        // 更新将位（如果移动的是将）
+        let kp = kingPos;
+        if (piece.type === PieceType.King) kp = to;
+        if (!isInCheckFast(grid, color, kp)) {
+          captures.push({ from, to });
+        }
+        unmakeMove(grid, undo);
+      }
+    }
+  }
+
+  return captures;
 }
 
 // ---- 走子应用 ----

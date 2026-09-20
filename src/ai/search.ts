@@ -15,6 +15,7 @@ import { positionKey, REPETITION_LIMIT, judgeCycle, type MoveKind } from '../eng
 import { evaluateBoard, getPieceValueSimple, hiddenPieceValue } from './evaluate';
 import { TranspositionTable, TTFlag } from './tt';
 import { computeHash, updateHash, sideKey } from './zobrist';
+import { seeCapture } from '../engine/see';
 
 // ---- 常量 ----
 const INF = 999999;
@@ -28,8 +29,9 @@ const LMR_MIN_MOVE_IDX = 4;
 const FUTILITY_MAX_DEPTH = 3;
 const FUTILITY_MARGIN = [0, 100, 200, 400];
 const QUIESCENCE_CHECK_MAX = 4; // QS 被将递归深度限制
-const NULL_MIN_DEPTH = 99;     // 空着裁剪最低深度（暂禁用以避免栈溢出）
+const NULL_MIN_DEPTH = 3;      // 空着裁剪最低深度（>=3 才启用，暗子局面安全）
 const NULL_R = 2;               // 空着裁剪缩减量
+const IID_MIN_DEPTH = 4;       // Internal Iterative Deepening 最低深度
 
 // ---- 搜索上下文 ----
 export interface SearchContext {
@@ -63,6 +65,16 @@ function makeTempState(grid: (Piece | null)[][], turn: Color): BoardState {
     moveHistory: [], redCaptured: [], blackCaptured: [],
     movesWithoutCapture: 0,
   };
+}
+
+/** 快速吃子评分（用于未被 SEE 评估的吃子，比 MVV-LVA 更快） */
+function quickCaptureScore(grid: (Piece | null)[][], mv: { from: Position; to: Position }): number {
+  const victim = grid[mv.to.row][mv.to.col];
+  if (!victim) return 0;
+  const attacker = grid[mv.from.row][mv.from.col];
+  const victimVal = victim.hidden ? 320 : getPieceValueSimple(victim.type);
+  const attackerVal = attacker?.hidden ? 320 : getPieceValueSimple(attacker?.type ?? PieceType.Pawn);
+  return victimVal * 100 - attackerVal;
 }
 
 export interface PathEntry {
@@ -111,6 +123,7 @@ function quiescence(
   kingPos: Record<Color, Position | null>,
   checkDepth: number = 0,  // 被将递归深度（防栈溢出）
   hash: number = 0,        // 当前局面的 Zobrist 哈希
+  cachedEval: number = 0,  // 预计算的评估值（0 表示未缓存）
 ): number {
   ctx.nodesSearched++;
 
@@ -121,9 +134,10 @@ function quiescence(
   const kp = kingPos[turn]!;
   const inCheck = isInCheckFast(grid, turn, kp);
 
-  const standPat = turn === Color.Red
-    ? evaluateBoard(grid)
-    : -evaluateBoard(grid);
+  // 使用缓存的评估值（如果可用），否则重新计算
+  const standPat = cachedEval !== 0
+    ? cachedEval
+    : (turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid));
 
   if (!inCheck && standPat >= beta) return beta;
   if (standPat > alpha) alpha = standPat;
@@ -142,29 +156,21 @@ function quiescence(
     return standPat;
   }
 
-  // 动态暗子期望值（用于 MVV-LVA 排序，避免每比较器扫描棋盘）
-  const hVal = hiddenPieceValue(grid);
-
-  // MVV-LVA 排序
-  captures.sort((a, b) => {
-    const va = grid[a.to.row][a.to.col]!;
-    const vb = grid[b.to.row][b.to.col]!;
-    const vaVal = va.hidden ? hVal : getPieceValueSimple(va.type);
-    const vbVal = vb.hidden ? hVal : getPieceValueSimple(vb.type);
-    if (vaVal !== vbVal) return vbVal - vaVal;
-    const aa = grid[a.from.row][a.from.col]!;
-    const ab = grid[b.from.row][b.from.col]!;
-    const aaVal = aa.hidden ? hVal : getPieceValueSimple(aa.type);
-    const abVal = ab.hidden ? hVal : getPieceValueSimple(ab.type);
-    return aaVal - abVal;
-  });
+  // SEE 排序：只对前 N 个吃子计算 SEE（最可能触发 beta 截断），其余用快速启发式
+  const MAX_SEE = 3;
+  const scoredCaptures = captures.map((mv, i) => ({
+    mv,
+    score: i < MAX_SEE ? seeCapture(grid, mv.from, mv.to) : quickCaptureScore(grid, mv),
+  }));
+  scoredCaptures.sort((a, b) => b.score - a.score);
+  const sortedCaptures = scoredCaptures.map(sc => sc.mv);
 
   // Delta 剪枝
   if (!inCheck && standPat + getPieceValueSimple(PieceType.Chariot) + 200 < alpha) return alpha;
 
   const nextCheckDepth = inCheck ? checkDepth + 1 : 0;
 
-  for (const mv of captures) {
+  for (const mv of sortedCaptures) {
     const undo = makeMove(grid, mv.from, mv.to);
     const newTurn = opponentColor(turn);
     const newHash = updateHash(hash, undo.movedPiece, mv.from, mv.to, undo.capturedPiece, newTurn);
@@ -300,6 +306,13 @@ function search(
   }
   if (ttEntry) ttMove = ttEntry.bestMove;
 
+  // Internal Iterative Deepening: PV 节点 + 深度足够 + TT 无走法 → 浅搜获取好着
+  if (isPV && depth >= IID_MIN_DEPTH && ttMove === 0) {
+    search(ctx, grid, turn, depth - 2, alpha, beta, ply, true, path, repetitionAware, kingPos, checkDepth, hash, false);
+    const iidEntry = ctx.tt.probe(hash);
+    if (iidEntry) ttMove = iidEntry.bestMove;
+  }
+
   // 叶节点 → 静态搜索
   if (depth <= 0) {
     return quiescence(ctx, grid, turn, alpha, beta, kingPos, checkDepth, hash);
@@ -314,10 +327,17 @@ function search(
     effectiveDepth = depth + 1;
   }
 
+  // 计算一次局面评估，供空着/Futility/剃刀三个剪枝条件复用
+  const needsEval = (allowNull && !isPV && !inCheck && effectiveDepth >= NULL_MIN_DEPTH) ||
+                    (!isPV && !inCheck && effectiveDepth <= FUTILITY_MAX_DEPTH) ||
+                    (!isPV && effectiveDepth <= 2 && !inCheck);
+  const evalScore = needsEval
+    ? (turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid))
+    : 0;
+
   // 空着裁剪（Null Move Pruning）
   if (allowNull && !isPV && !inCheck && effectiveDepth >= NULL_MIN_DEPTH) {
-    const staticEval = turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid);
-    if (staticEval >= beta) {
+    if (evalScore >= beta) {
       const nullTurn = opponentColor(turn);
       // 只换手不走子：XOR sideKey 切换轮次标记，路径不变，不记录重复
       const nullHash = (hash ^ sideKey) >>> 0;
@@ -338,17 +358,15 @@ function search(
 
   // Phase 3: Futility 剪枝
   if (!isPV && !inCheck && effectiveDepth <= FUTILITY_MAX_DEPTH) {
-    const staticEval = turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid);
-    if (staticEval + FUTILITY_MARGIN[effectiveDepth] <= alpha) {
-      return staticEval + FUTILITY_MARGIN[effectiveDepth];
+    if (evalScore + FUTILITY_MARGIN[effectiveDepth] <= alpha) {
+      return evalScore + FUTILITY_MARGIN[effectiveDepth];
     }
   }
 
   // 剃刀剪枝
   if (!isPV && effectiveDepth <= 2 && !inCheck) {
-    const staticEval = turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid);
-    if (staticEval - RAZOR_MARGIN * effectiveDepth >= beta) {
-      return staticEval - RAZOR_MARGIN * effectiveDepth;
+    if (evalScore - RAZOR_MARGIN * effectiveDepth >= beta) {
+      return evalScore - RAZOR_MARGIN * effectiveDepth;
     }
   }
 

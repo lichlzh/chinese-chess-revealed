@@ -40,11 +40,19 @@ export class TranspositionTable {
     return null;
   }
 
-  /** 存入条目（始终替换策略） */
+  /** 存入条目（深度优先替换策略：新深度 >= 旧深度 才替换） */
   store(hash: number, depth: number, score: number, flag: TTFlag, bestMove: number): void {
-    // 达到容量上限时不清除，保持高效
-    if (this.table.size >= MAX_SIZE) {
-      // 简单清理：删除第一个（Map 维持插入顺序）
+    const existing = this.table.get(hash);
+    // 已存在同哈希且深度更大 → 保留深搜结果
+    if (existing && existing.hash === hash && existing.depth > depth) {
+      return;
+    }
+    // 已存在但 flag 是 EXACT（最宝贵）→ 仅在深度相等时也保留
+    if (existing && existing.hash === hash && existing.depth === depth && existing.flag === TTFlag.EXACT && flag !== TTFlag.EXACT) {
+      return;
+    }
+    // 容量上限：只有不存在时才需要腾位
+    if (!existing && this.table.size >= MAX_SIZE) {
       const first = this.table.keys().next();
       if (!first.done) this.table.delete(first.value);
     }

@@ -141,27 +141,85 @@ function pieceEval(type: PieceType, row: number, col: number, color: Color): num
 /**
  * 完整评估（用于主搜索）
  * 正数 = 红方优，负数 = 黑方优
+ * 优化：单次扫描完成子力、暗子池、大子计数 + 机动性 + 兵型 + 开放线
  */
 export function evaluateBoard(grid: (Piece | null)[][]): number {
   let material = 0;
+  let redHidden = 0;
+  let blackHidden = 0;
+  let majors = 0;
+  let redMobility = 0;
+  let blackMobility = 0;
+  let redOpenLines = 0;
+  let blackOpenLines = 0;
+  let redPawnStructure = 0;
+  let blackPawnStructure = 0;
 
-  // 动态计算暗子期望值（基于剩余池）
-  const hiddenVal = hiddenPieceValue(grid);
+  // 已翻开非将棋子计数（用于暗子期望值计算）
+  let nChariot = 0, nHorse = 0, nCannon = 0, nElephant = 0, nAdvisor = 0, nPawn = 0;
 
-  // 子力 + PST
+  // 单次扫描：子力 + 暗子统计 + 大子计数 + 机动性 + 兵型 + 开放线
   for (let r = 0; r < 10; r++) {
     const row = grid[r];
     for (let c = 0; c < 9; c++) {
       const p = row[c];
       if (!p) continue;
 
-      const val = p.hidden
-        ? hiddenVal  // 暗子未翻开:超几何期望值,随剩余池收缩动态变化
-        : pieceEval(p.type, r, c, p.color);
+      if (p.hidden) {
+        if (p.color === Color.Red) redHidden++; else blackHidden++;
+      } else {
+        const val = pieceEval(p.type, r, c, p.color);
+        material += (p.color === Color.Red ? val : -val);
 
-      material += (p.color === Color.Red ? val : -val);
+        // 统计已翻开棋子（暗子池计算）+ 大子计数
+        switch (p.type) {
+          case PieceType.Chariot: nChariot++; majors++; break;
+          case PieceType.Horse:   nHorse++; majors++; break;
+          case PieceType.Cannon:  nCannon++; majors++; break;
+          case PieceType.Elephant: nElephant++; break;
+          case PieceType.Advisor: nAdvisor++; break;
+          case PieceType.Pawn:    nPawn++; break;
+        }
+
+        // 机动性：每个已翻开棋子的合法走法数（轻量计算）
+        const moves = countPieceMoves(grid, r, c, p);
+        if (p.color === Color.Red) redMobility += moves; else blackMobility += moves;
+
+        // 车/炮开放线检测
+        if (p.type === PieceType.Chariot || p.type === PieceType.Cannon) {
+          const openLines = countOpenLines(grid, r, c, p.color);
+          if (p.color === Color.Red) redOpenLines += openLines; else blackOpenLines += openLines;
+        }
+
+        // 兵型评估
+        if (p.type === PieceType.Pawn) {
+          const pawnScore = evaluatePawnStructure(grid, r, c, p.color);
+          if (p.color === Color.Red) redPawnStructure += pawnScore; else blackPawnStructure += pawnScore;
+        }
+      }
     }
   }
+
+  // 暗子期望值（基于剩余池）
+  const rChariot = Math.max(0, 2 - nChariot);
+  const rHorse = Math.max(0, 2 - nHorse);
+  const rCannon = Math.max(0, 2 - nCannon);
+  const rElephant = Math.max(0, 2 - nElephant);
+  const rAdvisor = Math.max(0, 2 - nAdvisor);
+  const rPawn = Math.max(0, 5 - nPawn);
+
+  const totalCount = rChariot + rHorse + rCannon + rElephant + rAdvisor + rPawn;
+  const hiddenVal = totalCount > 0
+    ? Math.round((rChariot * PIECE_VALUE[PieceType.Chariot] +
+                  rHorse * PIECE_VALUE[PieceType.Horse] +
+                  rCannon * PIECE_VALUE[PieceType.Cannon] +
+                  rElephant * PIECE_VALUE[PieceType.Elephant] +
+                  rAdvisor * PIECE_VALUE[PieceType.Advisor] +
+                  rPawn * PIECE_VALUE[PieceType.Pawn]) / totalCount)
+    : 320;
+
+  // 加上暗子的贡献
+  material += hiddenVal * (redHidden - blackHidden);
 
   // 国王安全（便宜）
   const redKing = findKing(grid, Color.Red);
@@ -173,19 +231,175 @@ export function evaluateBoard(grid: (Piece | null)[][]): number {
   const redSafety = kingSafety(grid, redKing, Color.Red);
   const blackSafety = kingSafety(grid, blackKing, Color.Black);
 
-  // 局面阶段：统计大子数
-  let majors = 0;
-  for (let r = 0; r < 10; r++) {
-    for (let c = 0; c < 9; c++) {
-      const p = grid[r][c];
-      if (p && !p.hidden && (p.type === PieceType.Chariot || p.type === PieceType.Horse || p.type === PieceType.Cannon)) {
-        majors++;
-      }
-    }
-  }
   const phaseFactor = Math.min(1, majors / 8); // 0(残局) ~ 1(开局)
 
-  return material + (redSafety - blackSafety) * phaseFactor;
+  // 综合评估：子力 + 国王安全 + 机动性 + 开放线 + 兵型
+  const mobilityBonus = (redMobility - blackMobility) * 2;
+  const openLineBonus = (redOpenLines - blackOpenLines) * 30;
+  const pawnBonus = (redPawnStructure - blackPawnStructure) * 10;
+
+  return material + (redSafety - blackSafety) * phaseFactor + mobilityBonus + openLineBonus + pawnBonus;
+}
+
+/** 轻量机动性：计算单个棋子的合法走法数（不生成完整着法列表） */
+function countPieceMoves(grid: (Piece | null)[][], row: number, col: number, piece: Piece): number {
+  let count = 0;
+  const { type, color } = piece;
+
+  if (type === PieceType.Chariot) {
+    // 车：四个方向
+    const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+    for (const [dr, dc] of dirs) {
+      let r = row + dr, c = col + dc;
+      while (r >= 0 && r <= 9 && c >= 0 && c <= 8) {
+        const p = grid[r][c];
+        if (!p) count++;
+        else { if (p.color !== color) count++; break; }
+        r += dr; c += dc;
+      }
+    }
+  } else if (type === PieceType.Horse) {
+    // 马：8个位置
+    const horseMoves = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+    const horseBlocks = [[-1,0],[-1,0],[0,-1],[0,1],[0,-1],[0,1],[1,0],[1,0]];
+    for (let i = 0; i < 8; i++) {
+      const nr = row + horseMoves[i][0], nc = col + horseMoves[i][1];
+      if (nr < 0 || nr > 9 || nc < 0 || nc > 8) continue;
+      const br = row + horseBlocks[i][0], bc = col + horseBlocks[i][1];
+      if (grid[br]?.[bc]) continue; // 蹩马腿
+      const p = grid[nr][nc];
+      if (!p || p.color !== color) count++;
+    }
+  } else if (type === PieceType.Cannon) {
+    // 炮：四个方向，需要炮架
+    const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+    for (const [dr, dc] of dirs) {
+      let r = row + dr, c = col + dc;
+      let jumped = false;
+      while (r >= 0 && r <= 9 && c >= 0 && c <= 8) {
+        const p = grid[r][c];
+        if (!jumped) {
+          if (!p) count++;
+          else jumped = true;
+        } else {
+          if (p) { if (p.color !== color) count++; break; }
+        }
+        r += dr; c += dc;
+      }
+    }
+  } else if (type === PieceType.Elephant) {
+    // 象：4个位置
+    const elephantMoves = [[-2,-2],[-2,2],[2,-2],[2,2]];
+    const elephantBlocks = [[-1,-1],[-1,1],[1,-1],[1,1]];
+    for (let i = 0; i < 4; i++) {
+      const nr = row + elephantMoves[i][0], nc = col + elephantMoves[i][1];
+      if (nr < 0 || nr > 9 || nc < 0 || nc > 8) continue;
+      const br = row + elephantBlocks[i][0], bc = col + elephantBlocks[i][1];
+      if (grid[br]?.[bc]) continue; // 塞象眼
+      const p = grid[nr][nc];
+      if (!p || p.color !== color) count++;
+    }
+  } else if (type === PieceType.Advisor) {
+    // 士：4个位置
+    const advisorMoves = [[-1,-1],[-1,1],[1,-1],[1,1]];
+    for (const [dr, dc] of advisorMoves) {
+      const nr = row + dr, nc = col + dc;
+      if (nr < 0 || nr > 9 || nc < 0 || nc > 8) continue;
+      // 士必须在九宫格内
+      if (color === Color.Red && (nr < 7 || nc < 3 || nc > 5)) continue;
+      if (color === Color.Black && (nr > 2 || nc < 3 || nc > 5)) continue;
+      const p = grid[nr][nc];
+      if (!p || p.color !== color) count++;
+    }
+  } else if (type === PieceType.Pawn) {
+    // 兵/卒
+    const forward = color === Color.Red ? -1 : 1;
+    const nr = row + forward;
+    if (nr >= 0 && nr <= 9) {
+      const p = grid[nr][col];
+      if (!p || p.color !== color) count++;
+    }
+    // 过河后可以横走
+    const crossed = color === Color.Red ? row <= 4 : row >= 5;
+    if (crossed) {
+      for (const dc of [-1, 1]) {
+        const nc = col + dc;
+        if (nc < 0 || nc > 8) continue;
+        const p = grid[row][nc];
+        if (!p || p.color !== color) count++;
+      }
+    }
+  } else if (type === PieceType.King) {
+    // 将/帅：4个位置
+    const kingMoves = [[-1,0],[1,0],[0,-1],[0,1]];
+    for (const [dr, dc] of kingMoves) {
+      const nr = row + dr, nc = col + dc;
+      if (nr < 0 || nr > 9 || nc < 0 || nc > 8) continue;
+      // 将帅必须在九宫格内
+      if (color === Color.Red && (nr < 7 || nc < 3 || nc > 5)) continue;
+      if (color === Color.Black && (nr > 2 || nc < 3 || nc > 5)) continue;
+      const p = grid[nr][nc];
+      if (!p || p.color !== color) count++;
+    }
+  }
+
+  return count;
+}
+
+/** 开放线检测：车/炮在列方向上无遮挡的线数 */
+function countOpenLines(grid: (Piece | null)[][], row: number, col: number, color: Color): number {
+  let open = 0;
+  // 检查列方向（上下）
+  for (const dir of [-1, 1]) {
+    let r = row + dir;
+    let blocked = false;
+    while (r >= 0 && r <= 9 && !blocked) {
+      const p = grid[r][col];
+      if (p) blocked = true;
+      r += dir;
+    }
+    if (!blocked) open++;
+  }
+  // 检查行方向（左右）
+  for (const dir of [-1, 1]) {
+    let c = col + dir;
+    let blocked = false;
+    while (c >= 0 && c <= 8 && !blocked) {
+      const p = grid[row][c];
+      if (p) blocked = true;
+      c += dir;
+    }
+    if (!blocked) open++;
+  }
+  return open;
+}
+
+/** 兵型评估：叠兵惩罚 + 通路兵奖励 */
+function evaluatePawnStructure(grid: (Piece | null)[][], row: number, col: number, color: Color): number {
+  let score = 0;
+
+  // 叠兵检测：同一列上是否有多个己方兵
+  let sameColPawns = 0;
+  for (let r = 0; r < 10; r++) {
+    const p = grid[r][col];
+    if (p && !p.hidden && p.type === PieceType.Pawn && p.color === color) {
+      sameColPawns++;
+    }
+  }
+  if (sameColPawns > 1) score -= 20 * (sameColPawns - 1); // 叠兵惩罚
+
+  // 通路兵检测：前方无敌方兵阻挡
+  const forward = color === Color.Red ? -1 : 1;
+  let r = row + forward;
+  let blocked = false;
+  while (r >= 0 && r <= 9 && !blocked) {
+    const p = grid[r][col];
+    if (p && p.color !== color && p.type === PieceType.Pawn) blocked = true;
+    r += forward;
+  }
+  if (!blocked) score += 30; // 通路兵奖励
+
+  return score;
 }
 
 /** 国王安全：护卫 + 暴露惩罚 */

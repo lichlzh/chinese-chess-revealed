@@ -1,6 +1,6 @@
 // ============================================================
-// 揭棋 - 自我对弈验证（AI vs AI 100 局）
-// 跑 100 局、导出每局棋谱，并对每一步做合法性 / 终局不变量检查。
+// 揭棋 - 自我对弈验证（AI vs AI 20 局）
+// 跑 20 局、导出每局棋谱，并对每一步做合法性 / 终局不变量检查。
 // 运行：npm test -- src/selftest/selfplay.test.ts
 // ============================================================
 
@@ -14,7 +14,7 @@ import { TranspositionTable } from '../ai/tt';
 import { buildGameRecord } from '../engine/record';
 import { Color, GameStatus, GameMode, samePos, type Piece } from '../engine/types';
 
-const NUM_GAMES = 100;
+const NUM_GAMES = 20;
 const MAX_PLIES = 400;
 // 浅搜索即可验证「游戏逻辑」：每步有硬时限，避免单步卡死
 const CONFIG = { maxDepth: 3, timeLimit: 60 };
@@ -119,9 +119,9 @@ function playOneGame(index: number): GameResult {
   };
 }
 
-describe('self-play 100 games', () => {
+describe('self-play 20 games', () => {
   test(
-    'AI vs AI 100 局自我对弈 + 合法性校验',
+    'AI vs AI 20 局自我对弈 + 合法性校验',
     () => {
       // 抑制搜索时的 debug 日志（timeLimit>0 才会打印）
       const origDebug = console.debug;

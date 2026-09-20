@@ -36,6 +36,11 @@ const IID_MIN_DEPTH = 4;       // Internal Iterative Deepening 最低深度
 const PROBCUT_MIN_DEPTH = 5;    // ProbCut 最低深度
 const PROBCUT_REDUCTION = 3;    // ProbCut 缩减深度
 const PROBCUT_MARGIN = 120;     // ProbCut 边界裕量
+const SINGULAR_MIN_DEPTH = 6;   // Singular Extension 最低深度
+const SINGULAR_MARGIN = 50;     // Singular 阈值：TT 着法必须领先此值才延伸
+const MULTICUT_MIN_DEPTH = 5;   // Multi-cut 最低深度
+const MULTICUT_CHECK_MOVES = 4; // 前 N 着浅搜
+const MULTICUT_CUT_THRESHOLD = 2; // ≥ N 着 fail-high 则剪枝
 
 // ---- 搜索上下文 ----
 export interface SearchContext {
@@ -399,14 +404,49 @@ function search(
   // 着法排序
   const scored = orderMoves(ctx, grid, turn, allMoves, ttMove, ply);
 
+  // Singular Extension：TT 着法显著优于其他 → 延伸 1 层
+  let singularExtend = false;
+  if (!isPV && ttMove !== 0 && effectiveDepth >= SINGULAR_MIN_DEPTH && scored.length >= 2) {
+    const singularBeta = beta - SINGULAR_MARGIN;
+    const ttIdx = scored.findIndex(m => m.encoded === ttMove);
+    if (ttIdx >= 0) {
+      const ttMoveObj = scored[ttIdx];
+      const undo = makeMove(grid, ttMoveObj.from, ttMoveObj.to);
+      const newTurn = opponentColor(turn);
+      const newHash = updateHash(hash, undo.movedPiece, ttMoveObj.from, ttMoveObj.to, undo.capturedPiece, newTurn);
+      const oldKpTurn = kingPos[turn];
+      const oldKpOpp = kingPos[newTurn];
+      if (grid[undo.toRow][undo.toCol]?.type === PieceType.King) {
+        kingPos[turn] = { row: undo.toRow, col: undo.toCol };
+      }
+      const newKey = positionKey(grid, newTurn);
+      const isChk = isInCheckFast(grid, newTurn, kingPos[newTurn]!);
+      let alreadyInPath = false;
+      for (const e of path) if (e.key === newKey) { alreadyInPath = true; break; }
+      const { kind, chases } = moveKindAfter(grid, turn, newTurn, isChk, alreadyInPath);
+      path.push({ key: newKey, side: turn, kind, chases });
+      const singularScore = -search(ctx, grid, newTurn, effectiveDepth - 2, -singularBeta, -singularBeta + 1,
+        ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
+      path.pop();
+      kingPos[turn] = oldKpTurn;
+      kingPos[newTurn] = oldKpOpp;
+      unmakeMove(grid, undo);
+      if (singularScore > singularBeta) {
+        singularExtend = true;
+      }
+    }
+  }
+
   // PVS 主搜索循环
   let bestScore = -INF;
   let bestMove = 0;
   let flag = TTFlag.ALPHA;
   let first = true;
+  let multiCutCount = 0;  // Multi-cut 计数器
 
   for (let i = 0; i < scored.length; i++) {
     const move = scored[i];
+    const isSingular = singularExtend && move.encoded === ttMove;
     const undo = makeMove(grid, move.from, move.to);
     const newTurn = opponentColor(turn);
     const newHash = updateHash(hash, undo.movedPiece, move.from, move.to, undo.capturedPiece, newTurn);
@@ -440,27 +480,30 @@ function search(
                     !grid[undo.toRow][undo.toCol]?.hidden &&
                     !undo.capturedPiece;
 
-    if (canLMR) {
+    // Singular 着法：延伸 1 层（不减反增）
+    const searchDepth = isSingular ? effectiveDepth : effectiveDepth - 1;
+
+    if (canLMR && !isSingular) {
       // 动态缩减：基础 1，序号大 +1，历史分低 +1，暗子攻击方 +0.5
       let reduction = 1;
       if (i >= 8) reduction++;
       if (histScore < 0) reduction++;           // 历史分低 → 多减
       if (grid[move.from.row][move.from.col]?.hidden) reduction++; // 暗子 → 多减
-      reduction = Math.min(reduction, effectiveDepth - 2); // 不能减太多
-      score = -search(ctx, grid, newTurn, effectiveDepth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
+      reduction = Math.min(reduction, searchDepth - 2); // 不能减太多
+      score = -search(ctx, grid, newTurn, searchDepth - reduction, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
       if (score > alpha) {
-        score = -search(ctx, grid, newTurn, effectiveDepth - 1, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
+        score = -search(ctx, grid, newTurn, searchDepth, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
         if (score > alpha && score < beta) {
-          score = -search(ctx, grid, newTurn, effectiveDepth - 1, -beta, -alpha, ply + 1, true, path, repetitionAware, kingPos, checkDepth, newHash);
+          score = -search(ctx, grid, newTurn, searchDepth, -beta, -alpha, ply + 1, true, path, repetitionAware, kingPos, checkDepth, newHash);
         }
       }
     } else if (first) {
-      score = -search(ctx, grid, newTurn, effectiveDepth - 1, -beta, -alpha, ply + 1, isPV, path, repetitionAware, kingPos, checkDepth, newHash);
+      score = -search(ctx, grid, newTurn, searchDepth, -beta, -alpha, ply + 1, isPV, path, repetitionAware, kingPos, checkDepth, newHash);
       first = false;
     } else {
-      score = -search(ctx, grid, newTurn, effectiveDepth - 1, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
+      score = -search(ctx, grid, newTurn, searchDepth, -alpha - 1, -alpha, ply + 1, false, path, repetitionAware, kingPos, checkDepth, newHash);
       if (score > alpha && score < beta) {
-        score = -search(ctx, grid, newTurn, effectiveDepth - 1, -beta, -alpha, ply + 1, true, path, repetitionAware, kingPos, checkDepth, newHash);
+        score = -search(ctx, grid, newTurn, searchDepth, -beta, -alpha, ply + 1, true, path, repetitionAware, kingPos, checkDepth, newHash);
       }
     }
 
@@ -483,7 +526,16 @@ function search(
             updateKiller(ctx, move.encoded, ply);
           }
           updateHistory(ctx, move.encoded, effectiveDepth);
-          break;
+
+          // Multi-cut：浅层前 N 着中 ≥2 着 fail-high → 直接剪枝
+          if (!isPV && effectiveDepth >= MULTICUT_MIN_DEPTH && i < MULTICUT_CHECK_MOVES) {
+            multiCutCount++;
+            if (multiCutCount >= MULTICUT_CUT_THRESHOLD) {
+              break;
+            }
+          } else {
+            break;
+          }
         }
       }
     }

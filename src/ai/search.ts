@@ -507,19 +507,21 @@ export function findBestMove(
 
   let bestMove: { from: Position; to: Position } | null = null;
   let bestScore = -INF;
+  let prevBestScore = -INF;
+  let windowSize = 80;  // 自适应窗口起始值（比固定 150 更激进）
 
   for (let depth = 1; depth <= config.maxDepth; depth++) {
     let alpha = -INF;
     let beta = INF;
 
     if (depth >= 2) {
-      const window = 150;
-      alpha = bestScore - window;
-      beta = bestScore + window;
+      alpha = bestScore - windowSize;
+      beta = bestScore + windowSize;
     }
 
     let currentBest: { from: Position; to: Position; encoded: number } | null = null;
     let currentBestScore = -INF;
+    let windowFail = false;
 
     const scored = orderMoves(ctx, state.grid, state.currentTurn, allMoves, 0, 0);
 
@@ -537,6 +539,7 @@ export function findBestMove(
 
       // 窗口失效 → 用全窗口重搜
       if (score <= alpha || score >= beta) {
+        windowFail = true;
         kingPos[state.currentTurn] = oldKp;
         unmakeMove(state.grid, undo);
 
@@ -563,8 +566,27 @@ export function findBestMove(
     }
 
     if (currentBest) {
+      prevBestScore = bestScore;
       bestMove = currentBest;
       bestScore = currentBestScore;
+    }
+
+    // 自适应窗口调整
+    if (depth >= 2) {
+      if (windowFail) {
+        // 窗口失效 → 扩大窗口（下次更容易命中）
+        windowSize = Math.min(windowSize * 2, 500);
+      } else {
+        // 窗口命中 → 根据稳定性微调
+        const scoreDelta = Math.abs(bestScore - prevBestScore);
+        if (scoreDelta > 80) {
+          // 分数波动大 → 稍扩大窗口
+          windowSize = Math.min(windowSize + 20, 300);
+        } else {
+          // 分数稳定 → 缩小窗口（提高精度）
+          windowSize = Math.max(windowSize - 10, 50);
+        }
+      }
     }
 
     if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > config.timeLimit) break;

@@ -26,8 +26,9 @@ const MAX_HISTORY = 1 << 16;
 const MAX_PLY = 128;
 const LMR_MIN_DEPTH = 3;
 const LMR_MIN_MOVE_IDX = 4;
-const FUTILITY_MAX_DEPTH = 3;
-const FUTILITY_MARGIN = [0, 100, 200, 400];
+const FUTILITY_MAX_DEPTH = 4;  // 扩展至 depth 4
+const EXTENDED_FUTILITY_MAX_DEPTH = 3;  // 扩展 futility（更深一层，更大裕量）
+const BASE_FUTILITY_MARGIN = [0, 80, 160, 280, 450];  // 基础裕量表
 const QUIESCENCE_CHECK_MAX = 4; // QS 被将递归深度限制
 const NULL_MIN_DEPTH = 3;      // 空着裁剪最低深度（>=3 才启用，暗子局面安全）
 const NULL_R = 2;               // 空着裁剪缩减量
@@ -368,10 +369,23 @@ function search(
     return DRAW_SCORE;
   }
 
-  // Phase 3: Futility 剪枝
+    // 动态 Futility 剪枝：裕量 = 基础值 + 暗子数量×30 + 子力差×0.3
   if (!isPV && !inCheck && effectiveDepth <= FUTILITY_MAX_DEPTH) {
-    if (evalScore + FUTILITY_MARGIN[effectiveDepth] <= alpha) {
-      return evalScore + FUTILITY_MARGIN[effectiveDepth];
+    const baseMargin = BASE_FUTILITY_MARGIN[effectiveDepth];
+    // 快速估算暗子数量影响（不确定性 → 增大裕量，减少误剪）
+    let hiddenCount = 0;
+    for (let r = 0; r < grid.length && r < 4; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (grid[r][c]?.hidden) hiddenCount++;
+      }
+    }
+    const dynamicMargin = baseMargin + hiddenCount * 25;
+    if (evalScore + dynamicMargin <= alpha) {
+      return evalScore + dynamicMargin;
+    }
+    // 扩展 Futility：更深一层用更大裕量
+    if (effectiveDepth <= EXTENDED_FUTILITY_MAX_DEPTH && evalScore - dynamicMargin * 1.5 >= beta) {
+      return evalScore - dynamicMargin * 1.5;
     }
   }
 

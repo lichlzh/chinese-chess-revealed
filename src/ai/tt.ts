@@ -20,9 +20,21 @@ export const enum TTFlag {
 /** 置换表最大条目数 */
 const MAX_SIZE = 1 << 20; // ~1M 条目
 
+/** 条目优先级：用于同深度替换决策（值越大越优先保留） */
+function entryPriority(flag: TTFlag): number {
+  switch (flag) {
+    case TTFlag.EXACT: return 3;
+    case TTFlag.BETA: return 2;
+    case TTFlag.ALPHA: return 1;
+    default: return 0;
+  }
+}
+
 /**
- * 简单置换表：基于原生 Map 实现
- * V8 对 Map<number, TTEntry> 有良好的优化
+ * 置换表：基于原生 Map + 深度优先替换 + 同深度优先级策略
+ *   - 新深度 > 旧深度 → 替换
+ *   - 新深度 = 旧深度 → 比较 flag 优先级（EXACT > BETA > ALPHA）
+ *   - 表满时淘汰深度最低的条目（非随机首条）
  */
 export class TranspositionTable {
   private table = new Map<number, TTEntry>();
@@ -40,23 +52,36 @@ export class TranspositionTable {
     return null;
   }
 
-  /** 存入条目（深度优先替换策略：新深度 >= 旧深度 才替换） */
+  /** 存入条目（深度优先 + 同深度优先级替换） */
   store(hash: number, depth: number, score: number, flag: TTFlag, bestMove: number): void {
     const existing = this.table.get(hash);
-    // 已存在同哈希且深度更大 → 保留深搜结果
-    if (existing && existing.hash === hash && existing.depth > depth) {
-      return;
+
+    if (existing && existing.hash === hash) {
+      // 已存在同哈希条目
+      if (existing.depth > depth) return; // 旧深度更大 → 保留
+      if (existing.depth === depth && entryPriority(existing.flag) > entryPriority(flag)) return; // 同深度但旧 flag 更优 → 保留
+    } else if (this.table.size >= MAX_SIZE) {
+      // 表满且为新条目 → 淘汰深度最低的旧条目
+      this.evictOldEntry();
     }
-    // 已存在但 flag 是 EXACT（最宝贵）→ 仅在深度相等时也保留
-    if (existing && existing.hash === hash && existing.depth === depth && existing.flag === TTFlag.EXACT && flag !== TTFlag.EXACT) {
-      return;
-    }
-    // 容量上限：只有不存在时才需要腾位
-    if (!existing && this.table.size >= MAX_SIZE) {
-      const first = this.table.keys().next();
-      if (!first.done) this.table.delete(first.value);
-    }
+
     this.table.set(hash, { hash, depth, score, flag, bestMove });
+  }
+
+  /** 淘汰策略：移除表中最浅深度的条目（扫描一批，取最小） */
+  private evictOldEntry(): void {
+    let minDepth = Infinity;
+    let minKey = -1;
+    let count = 0;
+    const batchSize = 32; // 每批扫描 32 条，找最浅的删除
+    for (const [key, entry] of this.table) {
+      if (entry.depth < minDepth) {
+        minDepth = entry.depth;
+        minKey = key;
+      }
+      if (++count >= batchSize) break;
+    }
+    if (minKey >= 0) this.table.delete(minKey);
   }
 
   /** 清空置换表 */

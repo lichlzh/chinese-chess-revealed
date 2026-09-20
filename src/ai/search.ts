@@ -12,9 +12,9 @@ import {
   computeChases, type BoardState,
 } from '../engine/moves';
 import { positionKey, REPETITION_LIMIT, judgeCycle, type MoveKind } from '../engine/repetition';
-import { evaluateBoard, getPieceValueSimple, HIDDEN_PIECE_VALUE } from './evaluate';
+import { evaluateBoard, getPieceValueSimple, hiddenPieceValue } from './evaluate';
 import { TranspositionTable, TTFlag } from './tt';
-import { computeHash, updateHash } from './zobrist';
+import { computeHash, updateHash, sideKey } from './zobrist';
 
 // ---- 常量 ----
 const INF = 999999;
@@ -28,6 +28,8 @@ const LMR_MIN_MOVE_IDX = 4;
 const FUTILITY_MAX_DEPTH = 3;
 const FUTILITY_MARGIN = [0, 100, 200, 400];
 const QUIESCENCE_CHECK_MAX = 4; // QS 被将递归深度限制
+const NULL_MIN_DEPTH = 99;     // 空着裁剪最低深度（暂禁用以避免栈溢出）
+const NULL_R = 2;               // 空着裁剪缩减量
 
 // ---- 搜索上下文 ----
 export interface SearchContext {
@@ -135,22 +137,25 @@ function quiescence(
     if (inCheck && checkDepth < QUIESCENCE_CHECK_MAX) {
       // 被将且无吃子 → 调用 search 降层解将
       // 递增 checkDepth 防止连续将军导致栈溢出
-      return search(ctx, grid, turn, 1, alpha, beta, 0, false, [], true, kingPos, checkDepth + 1, hash);
+      return search(ctx, grid, turn, 1, alpha, beta, 0, false, [], true, kingPos, checkDepth + 1, hash, false);
     }
     return standPat;
   }
+
+  // 动态暗子期望值（用于 MVV-LVA 排序，避免每比较器扫描棋盘）
+  const hVal = hiddenPieceValue(grid);
 
   // MVV-LVA 排序
   captures.sort((a, b) => {
     const va = grid[a.to.row][a.to.col]!;
     const vb = grid[b.to.row][b.to.col]!;
-    const vaVal = va.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(va.type);
-    const vbVal = vb.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(vb.type);
+    const vaVal = va.hidden ? hVal : getPieceValueSimple(va.type);
+    const vbVal = vb.hidden ? hVal : getPieceValueSimple(vb.type);
     if (vaVal !== vbVal) return vbVal - vaVal;
     const aa = grid[a.from.row][a.from.col]!;
     const ab = grid[b.from.row][b.from.col]!;
-    const aaVal = aa.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(aa.type);
-    const abVal = ab.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(ab.type);
+    const aaVal = aa.hidden ? hVal : getPieceValueSimple(aa.type);
+    const abVal = ab.hidden ? hVal : getPieceValueSimple(ab.type);
     return aaVal - abVal;
   });
 
@@ -196,6 +201,9 @@ function orderMoves(
   ttMove: number,
   ply: number,
 ): ScoredMove[] {
+  // 动态暗子期望值（一次计算，复用整个排序）
+  const hVal = hiddenPieceValue(grid);
+
   const result: ScoredMove[] = [];
   for (const m of moves) {
     const enc = encode(m.from, m.to);
@@ -207,8 +215,8 @@ function orderMoves(
       const victim = grid[m.to.row][m.to.col];
       const attacker = grid[m.from.row][m.from.col];
       if (victim) {
-        const victimVal = victim.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(victim.type);
-        const attackerVal = attacker?.hidden ? HIDDEN_PIECE_VALUE : getPieceValueSimple(attacker?.type ?? PieceType.Pawn);
+        const victimVal = victim.hidden ? hVal : getPieceValueSimple(victim.type);
+        const attackerVal = attacker?.hidden ? hVal : getPieceValueSimple(attacker?.type ?? PieceType.Pawn);
         score = 900_000 + victimVal * 100 - attackerVal;
       } else {
         const ki = Math.min(ply, MAX_PLY - 1);
@@ -262,6 +270,7 @@ function search(
   kingPos: Record<Color, Position | null> = { [Color.Red]: null, [Color.Black]: null },
   checkDepth: number = 0,
   hash: number = 0,
+  allowNull: boolean = true,
 ): number {
   ctx.nodesSearched++;
 
@@ -274,6 +283,11 @@ function search(
     const key = positionKey(grid, turn);
     const verdictScore = repetitionScore(key, path, turn, ply);
     if (verdictScore !== null) return verdictScore;
+  }
+
+  // 安全阀：超过最大层数直接返回静态评估（防栈溢出）
+  if (ply >= MAX_PLY) {
+    return turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid);
   }
 
   // 置换表探测（使用传入的增量哈希，避免每节点 O(90) 全扫描）
@@ -298,6 +312,19 @@ function search(
   let effectiveDepth = depth;
   if (inCheck) {
     effectiveDepth = depth + 1;
+  }
+
+  // 空着裁剪（Null Move Pruning）
+  if (allowNull && !isPV && !inCheck && effectiveDepth >= NULL_MIN_DEPTH) {
+    const staticEval = turn === Color.Red ? evaluateBoard(grid) : -evaluateBoard(grid);
+    if (staticEval >= beta) {
+      const nullTurn = opponentColor(turn);
+      // 只换手不走子：XOR sideKey 切换轮次标记，路径不变，不记录重复
+      const nullHash = (hash ^ sideKey) >>> 0;
+      const nullScore = -search(ctx, grid, nullTurn, effectiveDepth - 1 - NULL_R, -beta, -beta + 1,
+        ply + 1, false, path, false, kingPos, 0, nullHash, false);
+      if (nullScore >= beta) return beta;
+    }
   }
 
   // 生成合法着法

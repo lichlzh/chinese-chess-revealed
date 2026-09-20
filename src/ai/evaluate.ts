@@ -18,11 +18,46 @@ const PIECE_VALUE: Record<PieceType, number> = {
   [PieceType.Pawn]: 100,
 };
 
+/** 每方初始暗子池（不含将/帅） */
+const INITIAL_POOL: Record<PieceType, number> = {
+  [PieceType.King]: 0,
+  [PieceType.Chariot]: 2,
+  [PieceType.Horse]: 2,
+  [PieceType.Cannon]: 2,
+  [PieceType.Elephant]: 2,
+  [PieceType.Advisor]: 2,
+  [PieceType.Pawn]: 5,
+};
+
 /**
- * 暗子未翻开时的统一期望值（随机洗牌派）。
- * 取暗子池（车2/马2/炮2/象2/士2/兵5）子力价值的平均值 ≈ 320，
- * 不区分真实类型，避免 AI 偷看暗子身份。
+ * 计算当前棋盘上暗子的超几何期望价值。
+ * 根据已翻开/被吃的子推算剩余池中暗子的平均价值。
+ * 随剩余池收缩动态变化（车已翻完时暗子期望值下降）。
  */
+export function hiddenPieceValue(grid: (Piece | null)[][]): number {
+  const remaining: Record<PieceType, number> = { ...INITIAL_POOL };
+
+  for (let r = 0; r < 10; r++) {
+    for (let c = 0; c < 9; c++) {
+      const p = grid[r][c];
+      if (p && !p.hidden && p.type !== PieceType.King) {
+        remaining[p.type] = Math.max(0, remaining[p.type] - 1);
+      }
+    }
+  }
+
+  let totalVal = 0;
+  let totalCount = 0;
+  for (const t of [PieceType.Chariot, PieceType.Horse, PieceType.Cannon, PieceType.Elephant, PieceType.Advisor, PieceType.Pawn]) {
+    const n = remaining[t];
+    totalVal += n * PIECE_VALUE[t];
+    totalCount += n;
+  }
+
+  return totalCount > 0 ? Math.round(totalVal / totalCount) : 320;
+}
+
+/** 默认暗子价值（无棋盘信息时的回退值） */
 export const HIDDEN_PIECE_VALUE = 320;
 
 // 兵/卒过河加成
@@ -110,6 +145,9 @@ function pieceEval(type: PieceType, row: number, col: number, color: Color): num
 export function evaluateBoard(grid: (Piece | null)[][]): number {
   let material = 0;
 
+  // 动态计算暗子期望值（基于剩余池）
+  const hiddenVal = hiddenPieceValue(grid);
+
   // 子力 + PST
   for (let r = 0; r < 10; r++) {
     const row = grid[r];
@@ -118,7 +156,7 @@ export function evaluateBoard(grid: (Piece | null)[][]): number {
       if (!p) continue;
 
       const val = p.hidden
-        ? HIDDEN_PIECE_VALUE  // 暗子未翻开:统一期望值,不偷看随机真实类型
+        ? hiddenVal  // 暗子未翻开:超几何期望值,随剩余池收缩动态变化
         : pieceEval(p.type, r, c, p.color);
 
       material += (p.color === Color.Red ? val : -val);

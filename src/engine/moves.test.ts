@@ -163,7 +163,7 @@ describe('executeMove - 将死', () => {
     g[1][8] = createPiece(PieceType.Chariot, Color.Red, false);
     const res = executeMove(makeBoard(g, Color.Red), { row: 3, col: 0 }, { row: 0, col: 0 });
     expect(res).not.toBeNull();
-    expect(res!.newState.status).toBe(GameStatus.BlackWin);
+    expect(res!.newState.status).toBe(GameStatus.RedWin);
     expect(res!.newState.endReason).toBe('将死');
     expect(res!.move.isCheckmate).toBe(true);
     expect(res!.move.isCheck).toBe(true);
@@ -180,7 +180,7 @@ describe('executeMove - 困毙', () => {
     g[2][5] = createPiece(PieceType.Chariot, Color.Red, false);
     const res = executeMove(makeBoard(g, Color.Red), { row: 9, col: 3 }, { row: 8, col: 3 });
     expect(res).not.toBeNull();
-    expect(res!.newState.status).toBe(GameStatus.BlackWin);
+    expect(res!.newState.status).toBe(GameStatus.RedWin);
     expect(res!.newState.endReason).toBe('困毙');
   });
 });

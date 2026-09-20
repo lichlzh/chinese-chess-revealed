@@ -32,6 +32,9 @@ const QUIESCENCE_CHECK_MAX = 4; // QS 被将递归深度限制
 const NULL_MIN_DEPTH = 3;      // 空着裁剪最低深度（>=3 才启用，暗子局面安全）
 const NULL_R = 2;               // 空着裁剪缩减量
 const IID_MIN_DEPTH = 4;       // Internal Iterative Deepening 最低深度
+const PROBCUT_MIN_DEPTH = 5;    // ProbCut 最低深度
+const PROBCUT_REDUCTION = 3;    // ProbCut 缩减深度
+const PROBCUT_MARGIN = 120;     // ProbCut 边界裕量
 
 // ---- 搜索上下文 ----
 export interface SearchContext {
@@ -345,6 +348,15 @@ function search(
         ply + 1, false, path, false, kingPos, 0, nullHash, false);
       if (nullScore >= beta) return beta;
     }
+  }
+
+  // ProbCut 剪枝：深节点浅层搜索测试 beta+margin
+  if (!isPV && !inCheck && effectiveDepth >= PROBCUT_MIN_DEPTH && beta < MATE_SCORE - 200) {
+    const probcutBeta = beta + PROBCUT_MARGIN;
+    // 浅层搜索（同一局面、缩减深度、提升 beta）
+    const probcutScore = -search(ctx, grid, turn, effectiveDepth - PROBCUT_REDUCTION,
+      -probcutBeta, -probcutBeta + 1, ply, false, path, false, kingPos, 0, hash, false);
+    if (probcutScore >= probcutBeta) return beta;
   }
 
   // 生成合法着法

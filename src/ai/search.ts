@@ -522,9 +522,14 @@ export function findBestMove(
   let bestMove: { from: Position; to: Position } | null = null;
   let bestScore = -INF;
   let prevBestScore = -INF;
+  let prevBestMove: { from: Position; to: Position; encoded: number } | null = null;
   let windowSize = 80;  // 自适应窗口起始值（比固定 150 更激进）
+  let lastIterTime = 0;  // 上次迭代耗时（ms）
+  let iterStart = 0;     // 当前迭代开始时间
+  const timeSafety = Math.min(config.timeLimit * 0.9, config.timeLimit - 100);  // 安全线：90% 或 -100ms
 
   for (let depth = 1; depth <= config.maxDepth; depth++) {
+    iterStart = Date.now();
     let alpha = -INF;
     let beta = INF;
 
@@ -576,11 +581,12 @@ export function findBestMove(
         currentBest = { from: move.from, to: move.to, encoded: move.encoded };
       }
 
-      if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > ctx.timeLimit) break;
+      if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > timeSafety) break;
     }
 
     if (currentBest) {
       prevBestScore = bestScore;
+      prevBestMove = bestMove;
       bestMove = currentBest;
       bestScore = currentBestScore;
     }
@@ -603,8 +609,31 @@ export function findBestMove(
       }
     }
 
-    if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > config.timeLimit) break;
-    if (Math.abs(bestScore) > MATE_SCORE - 200) break;
+    // 时间管理：记录本次迭代耗时
+    lastIterTime = Date.now() - iterStart;
+
+    // 终止条件
+    if (ctx.timeLimit > 0 && Date.now() - ctx.searchStartTime > timeSafety) break;
+    if (Math.abs(bestScore) > MATE_SCORE - 200) break;  // 找到杀棋
+
+    // 预测性终止：如果下次迭代预计超时，提前停止
+    if (ctx.timeLimit > 0 && depth >= 2) {
+      // 假设下次迭代耗时 = 本次 × 分支因子增长系数（~4x）
+      const estimatedNext = lastIterTime * 4;
+      const elapsed = Date.now() - ctx.searchStartTime;
+      if (elapsed + estimatedNext > timeSafety) {
+        // 但如果最佳着法稳定且分数收敛，可以更早停止
+        const moveStable = prevBestMove && bestMove &&
+          prevBestMove.from.row === bestMove.from.row &&
+          prevBestMove.from.col === bestMove.from.col &&
+          prevBestMove.to.row === bestMove.to.row &&
+          prevBestMove.to.col === bestMove.to.col;
+        const scoreConverged = Math.abs(bestScore - prevBestScore) < 30;
+        if (!(moveStable && scoreConverged && depth >= 4)) {
+          break;  // 预测超时且局面未收敛 → 停止
+        }
+      }
+    }
   }
 
   if (ctx.timeLimit > 0) {
